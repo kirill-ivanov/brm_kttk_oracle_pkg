@@ -1,0 +1,906 @@
+CREATE OR REPLACE PACKAGE PK39_BILLING_DISCOUNT_BEE
+IS
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK39_BILLING_DISCOUNT_BEE';
+    -- ==============================================================================
+    -- Расчет скидок для "ВЫМПЕЛКОМ" 
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 1. Группа ВЫМПЕЛКОМ (npl)
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE GR1_BEE_NPL( p_period_id IN INTEGER );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 2. Группа ВЫМПЕЛКОМ_155M (npl D)
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE GR2_BEE_155M( p_period_id IN INTEGER );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 4. Группа ВЫМПЕЛКОМ_EPL (EPL) - dg_rule_id = 2508
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE GR4_BEE_EPL( p_period_id IN INTEGER );
+
+    -- ==============================================================================
+
+    -- Расчет всех групповых скидок для указанного периода
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Apply_discounts( p_period_id IN INTEGER );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Удаление всех групповых скидок
+    PROCEDURE Rollback_discounts( p_period_id IN INTEGER );
+    
+END PK39_BILLING_DISCOUNT_BEE;
+/
+CREATE OR REPLACE PACKAGE BODY PK39_BILLING_DISCOUNT_BEE
+IS
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- открывает задачу и заполняет очередь информацией о счетах
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Open_task( p_period_id IN INTEGER, p_dg_id IN INTEGER ) RETURN INTEGER
+IS
+    v_prcName CONSTANT VARCHAR2(30) := 'Open_task';
+    v_task_id INTEGER;
+    v_count   INTEGER;
+BEGIN
+    -- Получаем идентификатор задачи
+    v_task_id := PK30_BILLING_QUEUE.Open_task;
+        
+    -- Заполняем очередь
+    INSERT INTO BILLING_QUEUE_T(BILL_ID, ACCOUNT_ID, 
+                                TASK_ID, REP_PERIOD_ID, DATA_PERIOD_ID)
+    SELECT DISTINCT B.BILL_ID, GA.ACCOUNT_ID,  
+           v_task_id, p_period_id, p_period_id
+      FROM DISCOUNT_GROUP_T G, DG_ACCOUNT_T GA, BILL_T B, PERIOD_T P
+     WHERE G.DG_ID  = p_dg_id
+       AND P.PERIOD_ID     = p_period_id
+       AND G.DATE_FROM     < P.PERIOD_TO
+       AND (G.DATE_TO IS NULL OR P.PERIOD_FROM < G.DATE_TO)
+       AND GA.DATE_FROM    < P.PERIOD_TO
+       AND (GA.DATE_TO IS NULL OR P.PERIOD_FROM < GA.DATE_TO)
+       AND G.DG_ID         = GA.DG_ID
+       AND B.ACCOUNT_ID    = GA.ACCOUNT_ID
+       AND B.BILL_TYPE     = PK00_CONST.c_BILL_TYPE_REC
+       AND B.REP_PERIOD_ID = P.PERIOD_ID;
+    --
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('BILLING_QUEUE_T '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    RETURN v_task_id;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 1. Группа ВЫМПЕЛКОМ (npl) - dg_rule_id = 2503
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE GR1_BEE_NPL( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'GR1_BEE_NPL';
+    --v_dg_rule_id    CONSTANT INTEGER := 2503;
+    v_dg_id         CONSTANT INTEGER := 1293;
+    v_service_id    CONSTANT INTEGER := 101;   -- (МЦКС/NPL)
+    v_count         INTEGER;
+    v_sum_total     NUMBER;
+    v_percent       NUMBER;
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_task_id       INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получили размер начислений за услугу NPL
+    SELECT SUM(I.BILL_TOTAL) INTO v_sum_total
+      FROM ORDER_T O, ITEM_T I, BILL_T B
+     WHERE O.ACCOUNT_ID IN (
+        SELECT DA.ACCOUNT_ID 
+          FROM DG_ACCOUNT_T DA
+         WHERE DG_ID      = v_dg_id
+      )
+      AND O.SERVICE_ID    = v_service_id
+      AND O.ORDER_ID      = I.ORDER_ID
+      AND I.REP_PERIOD_ID = p_period_id
+      AND I.REP_PERIOD_ID = B.REP_PERIOD_ID
+      AND I.BILL_ID       = B.BILL_ID
+      AND I.CHARGE_TYPE NOT IN ('DIS','IDL');
+
+    Pk01_Syslog.Write_msg('sum_total = '||v_sum_total, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получаем размер скидки
+    SELECT DP.DISCOUNT_PRC INTO v_percent 
+      FROM DG_PERCENT_T DP
+     WHERE DG_ID = v_dg_id
+       AND VALUE_MIN <= v_sum_total
+       AND v_sum_total < VALUE_MAX;
+
+    Pk01_Syslog.Write_msg('percent = '||v_percent, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создаем компоненты услуги где их нет
+    v_count := 0;
+    --
+    FOR ro IN (
+      WITH OD AS (
+          SELECT OI.SPEED_STR, OI.SPEED_VALUE, OI.SPEED_UNIT_ID, O.*
+            FROM ORDER_T O, ORDER_INFO_T OI 
+           WHERE O.ACCOUNT_ID IN (
+              SELECT A.ACCOUNT_ID 
+                FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+               WHERE DA.DG_ID      = v_dg_id
+                 AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+                 AND A.ACCOUNT_NO NOT IN ('MK000082','MK000725','MK001252','MK001253','MK002035')
+            )
+            AND O.SERVICE_ID  = v_service_id
+            AND O.ORDER_ID = OI.ORDER_ID
+            AND ( -- заказы для которых установлена скорость <= 2 MB
+                 (OI.SPEED_VALUE <= 2 AND OI.SPEED_UNIT_ID = 6701) OR 
+                 (OI.SPEED_VALUE <= 2048 AND OI.SPEED_UNIT_ID = 6702)
+              )
+            AND EXISTS (
+              SELECT * 
+                FROM ITEM_T I, BILL_T B
+               WHERE B.REP_PERIOD_ID = p_period_id
+                 AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+                 AND B.BILL_ID       = I.BILL_ID
+                 AND O.ORDER_ID      = I.ORDER_ID
+            )
+      ) 
+      SELECT OB.ORDER_ID, 
+             MIN(OB.CURRENCY_ID) CURRENCY_ID,
+             MIN(OB.DATE_FROM) DATE_FROM 
+        FROM OD, ORDER_BODY_T OB
+       WHERE NOT EXISTS (
+            SELECT * FROM ORDER_BODY_T OBD
+             WHERE OBD.ORDER_ID = OD.ORDER_ID
+               AND OBD.CHARGE_TYPE = 'DIS'
+               AND OBD.DATE_FROM  <= v_period_to 
+               AND (OBD.DATE_TO IS NULL OR v_period_from <= OBD.DATE_TO)
+         ) 
+         AND OB.ORDER_ID = OD.ORDER_ID
+         AND OB.CHARGE_TYPE = 'REC'
+         AND OB.DATE_FROM  <= v_period_to 
+         AND (OB.DATE_TO IS NULL OR v_period_from <= OB.DATE_TO)
+       GROUP BY OB.ORDER_ID
+    )
+    LOOP
+       -- cоздаем позицию скидки
+       Pk06_ORDER.Add_subs_discount (
+                   p_order_id      => ro.order_id,    -- ID заказа - услуги
+                   p_currency_id   => ro.currency_id, -- ID валюты позиции
+                   p_date_from     => ro.date_from    -- дата начала действия
+               );
+       v_count := v_count + 1;
+    END LOOP;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Order_body_t(DIS): '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- открываем задачу и заполняет очередь информацией о счетах
+    v_task_id := Open_task( p_period_id, v_dg_id );
+    -- Расформировываем счета
+    Pk30_Billing_Base.Rollback_bills(v_task_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- формируем записи скидок
+    INSERT INTO ITEM_T I(
+      BILL_ID, REP_PERIOD_ID, 
+      ITEM_ID, ITEM_TYPE, INV_ITEM_ID, 
+      ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+      CHARGE_TYPE, 
+      ITEM_TOTAL, 
+      ITEM_CURRENCY_ID, 
+      RECVD, 
+      DATE_FROM, DATE_TO, ITEM_STATUS, 
+      CREATE_DATE, LAST_MODIFIED, 
+      REP_GROSS, REP_TAX, TAX_INCL, 
+      EXTERNAL_ID, NOTES, ORDER_BODY_ID, DESCR
+    )
+    WITH OD AS (   -- заказы для которых начисляется скидка 
+    SELECT O.ORDER_ID, O.SERVICE_ID
+      FROM ORDER_T O, ORDER_INFO_T OI 
+     WHERE O.ACCOUNT_ID IN (
+        SELECT A.ACCOUNT_ID
+          FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+         WHERE DA.DG_ID = v_dg_id
+           AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+           AND A.ACCOUNT_NO NOT IN ('MK000082','MK000725','MK001252','MK001253','MK002035')
+      )
+      AND O.ORDER_ID = OI.ORDER_ID
+      AND O.SERVICE_ID  = v_service_id
+      AND ( -- заказы для которых установлена скорость <= 2 MB
+           (OI.SPEED_VALUE <= 2 AND OI.SPEED_UNIT_ID = 6701) OR 
+           (OI.SPEED_VALUE <= 2048 AND OI.SPEED_UNIT_ID = 6702)
+        )
+    ), BI AS ( -- формируем скидки для заказов
+       SELECT 
+            B.BILL_ID, B.REP_PERIOD_ID, 
+            OD.ORDER_ID, OD.SERVICE_ID, 
+            -(SUM(I.ITEM_TOTAL) * v_percent) / 100 ITEM_TOTAL, 
+            I.ITEM_CURRENCY_ID, 
+            MIN(I.DATE_FROM) DATE_FROM, MAX(I.DATE_TO) DATE_TO,
+            I.TAX_INCL 
+         FROM ITEM_T I, BILL_T B, OD
+        WHERE B.REP_PERIOD_ID = p_period_id
+          AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+          AND B.BILL_ID       = I.BILL_ID
+          AND B.BILL_TYPE     = 'B'
+          AND I.ORDER_ID      = OD.ORDER_ID
+        GROUP BY 
+            B.BILL_ID, B.REP_PERIOD_ID, 
+            OD.ORDER_ID, OD.SERVICE_ID, 
+            I.ITEM_CURRENCY_ID, 
+            I.TAX_INCL
+    ) -- формируем позиции счета items
+    SELECT 
+          BI.BILL_ID, BI.REP_PERIOD_ID, 
+          SQ_ITEM_ID.NEXTVAL ITEM_ID, 
+          'B'  ITEM_TYPE, 
+          NULL INV_ITEM_ID, 
+          BI.ORDER_ID, BI.SERVICE_ID, 
+          OB.SUBSERVICE_ID, 
+          OB.CHARGE_TYPE, 
+          BI.ITEM_TOTAL,
+          BI.ITEM_CURRENCY_ID,
+          0 RECVD, 
+          BI.DATE_FROM, BI.DATE_TO, 
+          Pk00_Const.c_ITEM_STATE_OPEN,
+          SYSDATE CREATE_DATE, SYSDATE LAST_MODIFIED, 
+          0 REP_GROSS, 0 REP_TAX, BI.TAX_INCL, 
+          NULL EXTERNAL_ID, 
+          v_percent||' %'  NOTES,
+          OB.ORDER_BODY_ID, 
+          NULL
+      FROM BI, ORDER_BODY_T OB
+     WHERE BI.ORDER_ID = OB.ORDER_ID
+       AND OB.CHARGE_TYPE = Pk00_Const.c_CHARGE_TYPE_DIS
+    ;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- Формируем счета
+    Pk30_Billing_Base.Make_bills(v_task_id);
+    -- Освобождаем задачу
+    PK30_BILLING_QUEUE.Close_task(v_task_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Откат начислений
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Rollback_GR1_BEE_NPL( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Rollback_GR1_BEE_NPL';
+    v_dg_id         CONSTANT INTEGER := 1293;
+    v_service_id    CONSTANT INTEGER := 101;   -- (МЦКС/NPL)
+    v_task_id       INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- Получаем идентификатор задачи
+    v_task_id := PK30_BILLING_QUEUE.Open_task;
+
+    -- заполняем очередь счетов, которых коснется откат
+    INSERT INTO BILLING_QUEUE_T(BILL_ID, ACCOUNT_ID, TASK_ID, REP_PERIOD_ID, DATA_PERIOD_ID)
+    WITH OD AS (   -- заказы для которых начисляется скидка 
+    SELECT O.ACCOUNT_ID, O.ORDER_ID, O.SERVICE_ID
+      FROM ORDER_T O, ORDER_INFO_T OI 
+     WHERE O.ACCOUNT_ID IN (
+        SELECT A.ACCOUNT_ID
+          FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+         WHERE DA.DG_ID = v_dg_id
+           AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+           AND A.ACCOUNT_NO NOT IN ('MK000082','MK000725','MK001252','MK001253','MK002035')
+      )
+      AND O.ORDER_ID = OI.ORDER_ID
+      AND O.SERVICE_ID  = v_service_id
+      AND ( -- заказы для которых установлена скорость <= 2 MB
+           (OI.SPEED_VALUE <= 2 AND OI.SPEED_UNIT_ID = 6701) OR 
+           (OI.SPEED_VALUE <= 2048 AND OI.SPEED_UNIT_ID = 6702)
+        )
+    )
+    SELECT DISTINCT I.BILL_ID, OD.ACCOUNT_ID, v_task_id, I.REP_PERIOD_ID, I.REP_PERIOD_ID 
+      FROM OD, ITEM_T I
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.ORDER_ID      = OD.ORDER_ID
+       AND I.CHARGE_TYPE   = 'DIS'
+    ;
+
+    -- Расформировываем счета
+    Pk30_Billing_Base.Rollback_bills(v_task_id);
+    
+    -- удаляем позиции скидок по данной схеме
+    DELETE FROM ITEM_T I
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.CHARGE_TYPE   = 'DIS'
+       AND EXISTS (
+           SELECT * FROM BILLING_QUEUE_T Q
+            WHERE Q.BILL_ID       = I.BILL_ID
+              AND Q.REP_PERIOD_ID = I.REP_PERIOD_ID
+              AND Q.TASK_ID       = v_task_id
+       )
+    ;
+    -- Формируем счета
+    Pk30_Billing_Base.Make_bills(v_task_id);
+
+    -- Освобождаем задачу
+    PK30_BILLING_QUEUE.Close_task(p_task_id => v_task_id);
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 2. Группа ВЫМПЕЛКОМ_155M (npl D) - dg_rule_id = 2503
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE GR2_BEE_155M( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'GR2_BEE_155M';
+    --v_dg_rule_id    CONSTANT INTEGER := 2503;
+    v_dg_id         CONSTANT INTEGER := 1303;
+    v_service_id    CONSTANT INTEGER := 101; -- (МЦКС/NPL)
+    v_count         INTEGER;
+    v_sum_total     NUMBER;
+    v_percent       NUMBER;
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_task_id       INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получили размер начислений за услугу NPL
+    SELECT SUM(I.BILL_TOTAL) INTO v_sum_total
+      FROM ORDER_T O, ITEM_T I, BILL_T B
+     WHERE O.ACCOUNT_ID IN  (
+        SELECT DA.ACCOUNT_ID 
+          FROM DG_ACCOUNT_T DA
+         WHERE DG_ID      = v_dg_id
+      )
+      AND O.SERVICE_ID    = v_service_id
+      AND O.ORDER_ID      = I.ORDER_ID
+      AND I.REP_PERIOD_ID = p_period_id
+      AND I.REP_PERIOD_ID = B.REP_PERIOD_ID
+      AND I.BILL_ID       = B.BILL_ID
+      AND I.CHARGE_TYPE  != 'DIS';
+
+    Pk01_Syslog.Write_msg('sum_total = '||v_sum_total, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получаем размер скидки
+    SELECT DP.DISCOUNT_PRC INTO v_percent 
+      FROM DG_PERCENT_T DP
+     WHERE DG_ID = v_dg_id
+       AND VALUE_MIN <= v_sum_total
+       AND v_sum_total < VALUE_MAX;
+
+    Pk01_Syslog.Write_msg('percent = '||v_percent, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создаем компоненты услуги где их нет
+    v_count := 0;
+    --
+    FOR ro IN (
+      WITH OD AS (
+          SELECT OI.SPEED_STR, OI.SPEED_VALUE, OI.SPEED_UNIT_ID, 
+                 O.ORDER_ID, O.SERVICE_ID
+            FROM ORDER_T O, ORDER_INFO_T OI 
+           WHERE O.ORDER_ID = OI.ORDER_ID
+             AND O.ACCOUNT_ID IN (
+              SELECT A.ACCOUNT_ID 
+                FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+               WHERE DA.DG_ID      = v_dg_id
+                 AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+                 AND A.ACCOUNT_NO NOT IN ('MK001252','MK001253','MK002035')
+            )
+            AND O.SERVICE_ID  = v_service_id 
+            AND EXISTS (
+              SELECT * 
+                FROM ITEM_T I, BILL_T B
+               WHERE B.REP_PERIOD_ID = p_period_id
+                 AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+                 AND B.BILL_ID       = I.BILL_ID
+                 AND O.ORDER_ID      = I.ORDER_ID
+            )
+      ) 
+      SELECT OB.ORDER_ID, 
+             MIN(OB.CURRENCY_ID) CURRENCY_ID,
+             MIN(OB.DATE_FROM) DATE_FROM 
+        FROM OD, ORDER_BODY_T OB
+       WHERE NOT EXISTS (
+            SELECT * FROM ORDER_BODY_T OBD
+             WHERE OBD.ORDER_ID = OD.ORDER_ID
+               AND OBD.CHARGE_TYPE = 'DIS'
+               AND OBD.DATE_FROM  <= v_period_to 
+               AND (OBD.DATE_TO IS NULL OR v_period_from <= OBD.DATE_TO)
+         ) 
+         AND OB.ORDER_ID = OD.ORDER_ID
+         AND OB.CHARGE_TYPE = 'REC'
+         AND OB.DATE_FROM  <= v_period_to 
+         AND (OB.DATE_TO IS NULL OR v_period_from <= OB.DATE_TO)
+       GROUP BY OB.ORDER_ID
+    )
+    LOOP
+       -- cоздаем позицию скидки
+       Pk06_ORDER.Add_subs_discount (
+                   p_order_id      => ro.order_id,    -- ID заказа - услуги
+                   p_currency_id   => ro.currency_id, -- ID валюты позиции
+                   p_date_from     => ro.date_from    -- дата начала действия
+               );
+       v_count := v_count + 1;
+    END LOOP;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Order_body_t(DIS): '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- открываем задачу и заполняет очередь информацией о счетах
+    v_task_id := Open_task( p_period_id, v_dg_id );
+    -- Расформировываем счета
+    Pk30_Billing_Base.Rollback_bills(v_task_id);
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- формируем записи скидок
+    INSERT INTO ITEM_T I(
+      BILL_ID, REP_PERIOD_ID, 
+      ITEM_ID, ITEM_TYPE, INV_ITEM_ID, 
+      ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+      CHARGE_TYPE, 
+      ITEM_TOTAL, 
+      ITEM_CURRENCY_ID, 
+      RECVD, 
+      DATE_FROM, DATE_TO, ITEM_STATUS, 
+      CREATE_DATE, LAST_MODIFIED, 
+      REP_GROSS, REP_TAX, TAX_INCL, 
+      EXTERNAL_ID, NOTES, ORDER_BODY_ID, DESCR
+    )
+    WITH OD AS (   -- заказы для которых начисляется скидка 
+    SELECT O.ORDER_ID, O.SERVICE_ID
+      FROM ORDER_T O 
+     WHERE O.ACCOUNT_ID IN (
+        SELECT A.ACCOUNT_ID 
+          FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+         WHERE DA.DG_ID = v_dg_id
+           AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+           AND A.ACCOUNT_NO NOT IN ('MK001252','MK001253','MK002035')
+      )
+      AND O.SERVICE_ID = v_service_id
+    ), BI AS ( -- формируем скидки для заказов
+       SELECT 
+            B.BILL_ID, B.REP_PERIOD_ID, 
+            OD.ORDER_ID, OD.SERVICE_ID, 
+            -(SUM(I.ITEM_TOTAL) * v_percent) / 100 ITEM_TOTAL, 
+            I.ITEM_CURRENCY_ID, 
+            MIN(I.DATE_FROM) DATE_FROM, MAX(I.DATE_TO) DATE_TO,
+            I.TAX_INCL 
+         FROM ITEM_T I, BILL_T B, OD
+        WHERE B.REP_PERIOD_ID = p_period_id
+          AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+          AND B.BILL_ID       = I.BILL_ID
+          AND B.BILL_TYPE     = 'B'
+          AND I.ORDER_ID      = OD.ORDER_ID
+        GROUP BY 
+            B.BILL_ID, B.REP_PERIOD_ID, 
+            OD.ORDER_ID, OD.SERVICE_ID, 
+            I.ITEM_CURRENCY_ID, 
+            I.TAX_INCL
+    ) -- формируем позиции счета items
+    SELECT 
+          BI.BILL_ID, BI.REP_PERIOD_ID, 
+          SQ_ITEM_ID.NEXTVAL ITEM_ID, 
+          'B'  ITEM_TYPE, 
+          NULL INV_ITEM_ID, 
+          BI.ORDER_ID, BI.SERVICE_ID, 
+          OB.SUBSERVICE_ID, 
+          OB.CHARGE_TYPE, 
+          BI.ITEM_TOTAL,
+          BI.ITEM_CURRENCY_ID,
+          0 RECVD, 
+          BI.DATE_FROM, BI.DATE_TO, 
+          Pk00_Const.c_ITEM_STATE_OPEN,
+          SYSDATE CREATE_DATE, SYSDATE LAST_MODIFIED, 
+          0 REP_GROSS, 0 REP_TAX, BI.TAX_INCL, 
+          NULL EXTERNAL_ID, 
+          v_percent||' %'  NOTES,
+          OB.ORDER_BODY_ID, 
+          NULL
+      FROM BI, ORDER_BODY_T OB
+     WHERE BI.ORDER_ID = OB.ORDER_ID
+       AND OB.CHARGE_TYPE = Pk00_Const.c_CHARGE_TYPE_DIS
+    ;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+ 
+    -- Формируем счета
+    Pk30_Billing_Base.Make_bills(v_task_id);
+    -- Освобождаем задачу
+    PK30_BILLING_QUEUE.Close_task(v_task_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Откат начислений
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Rollback_GR2_BEE_155M( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Rollback_GR2_BEE_155M';
+    v_dg_id         CONSTANT INTEGER := 1303;
+    v_service_id    CONSTANT INTEGER := 101; -- (МЦКС/NPL)
+    v_task_id       INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- Получаем идентификатор задачи
+    v_task_id := PK30_BILLING_QUEUE.Open_task;
+
+    -- заполняем очередь счетов, которых коснется откат
+    INSERT INTO BILLING_QUEUE_T(BILL_ID, ACCOUNT_ID, TASK_ID, REP_PERIOD_ID, DATA_PERIOD_ID)
+    WITH OD AS (   -- заказы для которых начисляется скидка 
+    SELECT O.ACCOUNT_ID, O.ORDER_ID, O.SERVICE_ID
+      FROM ORDER_T O, ORDER_INFO_T OI 
+     WHERE O.ACCOUNT_ID IN (
+        SELECT A.ACCOUNT_ID
+          FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+         WHERE DA.DG_ID = v_dg_id
+           AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+           AND A.ACCOUNT_NO NOT IN ('MK001252','MK001253','MK002035')
+      )
+      AND O.ORDER_ID = OI.ORDER_ID
+      AND O.SERVICE_ID  = v_service_id
+    )
+    SELECT DISTINCT I.BILL_ID, OD.ACCOUNT_ID, v_task_id, I.REP_PERIOD_ID, I.REP_PERIOD_ID 
+      FROM OD, ITEM_T I
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.ORDER_ID      = OD.ORDER_ID
+       AND I.CHARGE_TYPE   = 'DIS'
+    ;
+
+    -- Расформировываем счета
+    Pk30_Billing_Base.Rollback_bills(v_task_id);
+    
+    -- удаляем позиции скидок по данной схеме
+    DELETE FROM ITEM_T I
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.CHARGE_TYPE = 'DIS'
+       AND EXISTS (
+           SELECT * FROM BILLING_QUEUE_T Q
+            WHERE Q.BILL_ID       = I.BILL_ID
+              AND Q.REP_PERIOD_ID = I.REP_PERIOD_ID
+              AND Q.TASK_ID       = v_task_id
+       )
+    ;
+    -- Формируем счета
+    Pk30_Billing_Base.Make_bills(v_task_id);
+
+    -- Освобождаем задачу
+    PK30_BILLING_QUEUE.Close_task(p_task_id => v_task_id);
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 4. Группа ВЫМПЕЛКОМ_EPL (EPL) - dg_rule_id = 2503
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE GR4_BEE_EPL( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'GR4_BEE_EPL';
+    --v_dg_rule_id    CONSTANT INTEGER := 2503;
+    v_dg_id         CONSTANT INTEGER := 1312;
+    v_service_id    CONSTANT INTEGER := 133; -- 'Виртуальный канал Ethernet (EPL)'
+    v_count         INTEGER;
+    v_sum_total     NUMBER;
+    v_percent       NUMBER;
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_task_id       INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получили размер начислений за услугу NPL
+    SELECT SUM(I.BILL_TOTAL) INTO v_sum_total
+      FROM ORDER_T O, ITEM_T I, BILL_T B
+     WHERE O.ACCOUNT_ID IN  (
+        SELECT DA.ACCOUNT_ID 
+          FROM DG_ACCOUNT_T DA
+         WHERE DG_ID      = v_dg_id
+      )
+      AND O.SERVICE_ID    = v_service_id
+      AND O.ORDER_ID      = I.ORDER_ID
+      AND I.REP_PERIOD_ID = p_period_id
+      AND I.REP_PERIOD_ID = B.REP_PERIOD_ID
+      AND I.BILL_ID       = B.BILL_ID
+      AND I.CHARGE_TYPE  != 'DIS';
+
+    Pk01_Syslog.Write_msg('sum_total = '||v_sum_total, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получаем размер скидки
+    SELECT DP.DISCOUNT_PRC INTO v_percent 
+      FROM DG_PERCENT_T DP
+     WHERE DG_ID = v_dg_id
+       AND VALUE_MIN <= v_sum_total
+       AND v_sum_total < VALUE_MAX;
+
+    Pk01_Syslog.Write_msg('percent = '||v_percent, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создаем компоненты услуги где их нет
+    v_count := 0;
+    --
+    FOR ro IN (
+      WITH OD AS (
+          SELECT OI.SPEED_STR, OI.SPEED_VALUE, OI.SPEED_UNIT_ID, 
+                 O.ORDER_ID, O.SERVICE_ID
+            FROM ORDER_T O, ORDER_INFO_T OI 
+           WHERE O.ORDER_ID = OI.ORDER_ID
+             AND O.ACCOUNT_ID IN (
+              SELECT A.ACCOUNT_ID 
+                FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+               WHERE DA.DG_ID      = v_dg_id
+                 AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+                 AND A.ACCOUNT_NO NOT IN ('MK001527')
+            )
+            AND O.SERVICE_ID  = v_service_id 
+            AND EXISTS (
+              SELECT * 
+                FROM ITEM_T I, BILL_T B
+               WHERE B.REP_PERIOD_ID = p_period_id
+                 AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+                 AND B.BILL_ID       = I.BILL_ID
+                 AND O.ORDER_ID      = I.ORDER_ID
+            )
+      ) 
+      SELECT OB.ORDER_ID, 
+             MIN(OB.CURRENCY_ID) CURRENCY_ID,
+             MIN(OB.DATE_FROM) DATE_FROM 
+        FROM OD, ORDER_BODY_T OB
+       WHERE NOT EXISTS (
+            SELECT * FROM ORDER_BODY_T OBD
+             WHERE OBD.ORDER_ID = OD.ORDER_ID
+               AND OBD.CHARGE_TYPE = 'DIS'
+               AND OBD.DATE_FROM  <= v_period_to 
+               AND (OBD.DATE_TO IS NULL OR v_period_from <= OBD.DATE_TO)
+         ) 
+         AND OB.ORDER_ID = OD.ORDER_ID
+         AND OB.CHARGE_TYPE = 'REC'
+         AND OB.DATE_FROM  <= v_period_to 
+         AND (OB.DATE_TO IS NULL OR v_period_from <= OB.DATE_TO)
+       GROUP BY OB.ORDER_ID
+    )
+    LOOP
+       -- cоздаем позицию скидки
+       Pk06_ORDER.Add_subs_discount (
+                   p_order_id      => ro.order_id,    -- ID заказа - услуги
+                   p_currency_id   => ro.currency_id, -- ID валюты позиции
+                   p_date_from     => ro.date_from    -- дата начала действия
+               );
+       v_count := v_count + 1;
+    END LOOP;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Order_body_t(DIS): '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- открываем задачу и заполняет очередь информацией о счетах
+    v_task_id := Open_task( p_period_id, v_dg_id );
+    -- Расформировываем счета
+    Pk30_Billing_Base.Rollback_bills(v_task_id);
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- формируем записи скидок
+    INSERT INTO ITEM_T I(
+      BILL_ID, REP_PERIOD_ID, 
+      ITEM_ID, ITEM_TYPE, INV_ITEM_ID, 
+      ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+      CHARGE_TYPE, 
+      ITEM_TOTAL, 
+      ITEM_CURRENCY_ID, 
+      RECVD, 
+      DATE_FROM, DATE_TO, ITEM_STATUS, 
+      CREATE_DATE, LAST_MODIFIED, 
+      REP_GROSS, REP_TAX, TAX_INCL, 
+      EXTERNAL_ID, NOTES, ORDER_BODY_ID, DESCR
+    )
+    WITH OD AS (   -- заказы для которых начисляется скидка 
+    SELECT O.ORDER_ID, O.SERVICE_ID
+      FROM ORDER_T O 
+     WHERE O.ACCOUNT_ID IN (
+        SELECT A.ACCOUNT_ID 
+          FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+         WHERE DA.DG_ID = v_dg_id
+           AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+           AND A.ACCOUNT_NO NOT IN ('MK001527')
+      )
+      AND O.SERVICE_ID = v_service_id
+    ), BI AS ( -- формируем скидки для заказов
+       SELECT 
+            B.BILL_ID, B.REP_PERIOD_ID, 
+            OD.ORDER_ID, OD.SERVICE_ID, 
+            -(SUM(I.ITEM_TOTAL) * v_percent) / 100 ITEM_TOTAL, 
+            I.ITEM_CURRENCY_ID, 
+            MIN(I.DATE_FROM) DATE_FROM, MAX(I.DATE_TO) DATE_TO,
+            I.TAX_INCL 
+         FROM ITEM_T I, BILL_T B, OD
+        WHERE B.REP_PERIOD_ID = p_period_id
+          AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+          AND B.BILL_ID       = I.BILL_ID
+          AND B.BILL_TYPE     = 'B'
+          AND I.ORDER_ID      = OD.ORDER_ID
+        GROUP BY 
+            B.BILL_ID, B.REP_PERIOD_ID, 
+            OD.ORDER_ID, OD.SERVICE_ID, 
+            I.ITEM_CURRENCY_ID, 
+            I.TAX_INCL
+    ) -- формируем позиции счета items
+    SELECT 
+          BI.BILL_ID, BI.REP_PERIOD_ID, 
+          SQ_ITEM_ID.NEXTVAL ITEM_ID, 
+          'B'  ITEM_TYPE, 
+          NULL INV_ITEM_ID, 
+          BI.ORDER_ID, BI.SERVICE_ID, 
+          OB.SUBSERVICE_ID, 
+          OB.CHARGE_TYPE, 
+          BI.ITEM_TOTAL,
+          BI.ITEM_CURRENCY_ID,
+          0 RECVD, 
+          BI.DATE_FROM, BI.DATE_TO, 
+          Pk00_Const.c_ITEM_STATE_OPEN,
+          SYSDATE CREATE_DATE, SYSDATE LAST_MODIFIED, 
+          0 REP_GROSS, 0 REP_TAX, BI.TAX_INCL, 
+          NULL EXTERNAL_ID, 
+          v_percent||' %'  NOTES,
+          OB.ORDER_BODY_ID, 
+          NULL
+      FROM BI, ORDER_BODY_T OB
+     WHERE BI.ORDER_ID = OB.ORDER_ID
+       AND OB.CHARGE_TYPE = Pk00_Const.c_CHARGE_TYPE_DIS
+    ;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- Формируем счета
+    Pk30_Billing_Base.Make_bills(v_task_id);
+    -- Освобождаем задачу
+    PK30_BILLING_QUEUE.Close_task(v_task_id);
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Откат начислений
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Rollback_GR4_BEE_EPL( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Rollback_GR4_BEE_EPL';
+    v_dg_id         CONSTANT INTEGER := 1312;
+    v_service_id    CONSTANT INTEGER := 133; -- 'Виртуальный канал Ethernet (EPL)'
+    v_task_id       INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- Получаем идентификатор задачи
+    v_task_id := PK30_BILLING_QUEUE.Open_task;
+
+    -- заполняем очередь счетов, которых коснется откат
+    INSERT INTO BILLING_QUEUE_T(BILL_ID, ACCOUNT_ID, TASK_ID, REP_PERIOD_ID, DATA_PERIOD_ID)
+    WITH OD AS (   -- заказы для которых начисляется скидка 
+    SELECT O.ACCOUNT_ID, O.ORDER_ID, O.SERVICE_ID
+      FROM ORDER_T O, ORDER_INFO_T OI 
+     WHERE O.ACCOUNT_ID IN (
+        SELECT A.ACCOUNT_ID
+          FROM DG_ACCOUNT_T DA, ACCOUNT_T A
+         WHERE DA.DG_ID = v_dg_id
+           AND DA.ACCOUNT_ID = A.ACCOUNT_ID
+           AND A.ACCOUNT_NO NOT IN ('MK001527')
+      )
+      AND O.ORDER_ID = OI.ORDER_ID
+      AND O.SERVICE_ID  = v_service_id
+    )
+    SELECT DISTINCT I.BILL_ID, OD.ACCOUNT_ID, v_task_id, I.REP_PERIOD_ID, I.REP_PERIOD_ID 
+      FROM OD, ITEM_T I
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.ORDER_ID      = OD.ORDER_ID
+       AND I.CHARGE_TYPE   = 'DIS'
+    ;
+
+    -- Расформировываем счета
+    Pk30_Billing_Base.Rollback_bills(v_task_id);
+    
+    -- удаляем позиции скидок по данной схеме
+    DELETE FROM ITEM_T I
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.CHARGE_TYPE = 'DIS'
+       AND EXISTS (
+           SELECT * FROM BILLING_QUEUE_T Q
+            WHERE Q.BILL_ID       = I.BILL_ID
+              AND Q.REP_PERIOD_ID = I.REP_PERIOD_ID
+              AND Q.TASK_ID       = v_task_id
+       )
+    ;
+
+    -- Формируем счета
+    Pk30_Billing_Base.Make_bills(v_task_id);
+
+    -- Освобождаем задачу
+    PK30_BILLING_QUEUE.Close_task(p_task_id => v_task_id);
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ========================================================================== --
+-- Расчет всех групповых скидок
+-- ========================================================================== --
+PROCEDURE Apply_discounts( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Apply_discounts';
+    v_task_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- 1. Группа ВЫМПЕЛКОМ (npl)
+    GR1_BEE_NPL( p_period_id );
+
+    -- 2. Группа ВЫМПЕЛКОМ_155M (npl D)
+    GR2_BEE_155M( p_period_id );
+
+    -- 4. Группа ВЫМПЕЛКОМ_EPL (EPL) - dg_rule_id = 2508
+    GR4_BEE_EPL( p_period_id );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ========================================================================== --
+-- Удаление всех групповых скидок
+-- ========================================================================== --
+PROCEDURE Rollback_discounts( p_period_id IN INTEGER )
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Rollback_discounts';
+    v_task_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- 1. Группа ВЫМПЕЛКОМ (npl)
+    Rollback_GR1_BEE_NPL( p_period_id );
+
+    -- 2. Группа ВЫМПЕЛКОМ_155M (npl D)
+    Rollback_GR2_BEE_155M( p_period_id );
+
+    -- 4. Группа ВЫМПЕЛКОМ_EPL (EPL) - dg_rule_id = 2508
+    Rollback_GR4_BEE_EPL( p_period_id );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+END PK39_BILLING_DISCOUNT_BEE;
+/

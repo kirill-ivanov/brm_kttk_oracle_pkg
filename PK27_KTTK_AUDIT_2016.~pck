@@ -1,0 +1,598 @@
+CREATE OR REPLACE PACKAGE PK27_KTTK_AUDIT_2016
+IS
+    --
+    -- CВОДНЫЕ ОТЧЕТЫ по операторам местного и зонового присоединения
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK27_KTTK_AUDIT_2016';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 0;
+    c_RET_ER		constant integer :=-1;
+    
+    type t_refc is ref cursor;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 1. Выгружаем данные счетов
+    --
+    PROCEDURE Bills( p_recordset OUT t_refc );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 2. Выгружаем данные позиций счетов
+    --
+    PROCEDURE Items( p_recordset OUT t_refc );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 3. по фиксированным начислениям: 
+    --    ссылка на item, номер заказа, даты действия. период, за который выставлен платеж, тариф, сумма, валюта.
+    --
+    -- абонплата
+    PROCEDURE Detail_rec_fixrates( p_recordset OUT t_refc );
+               
+    -- доплата до минимальной стоимости
+    PROCEDURE Detail_min_fixrates( p_recordset OUT t_refc );
+
+    -- -----------------------------------------------------------------------------------------------------
+    -- 4. по голосовым услугам: ссылка на item, номер заказа, даты действия, направление, кол-во звонков, минут, цена, сумма, валюта.
+    --
+    -- клиентский трафик
+    PROCEDURE Detail_clnt_voice(  p_recordset OUT t_refc );
+    PROCEDURE Detail_clnt_voice_ctrl(  p_recordset OUT t_refc );
+
+    -- межоператорский трафик
+    PROCEDURE Detail_oper_voice(  p_recordset OUT t_refc );
+    PROCEDURE Detail_oper_voice_ctrl(  p_recordset OUT t_refc );
+
+    -- -----------------------------------------------------------------------------------------------------
+    -- 5. по IP VPN:  ссылка на item, номер заказа, даты действия, qos, зоны, объем, тариф, сумма, доплата до минималки
+    --
+    PROCEDURE Detail_ip_vpn( p_recordset OUT t_refc );
+    PROCEDURE Detail_ip_vpn_ctrl( p_recordset OUT t_refc );
+
+    -- -----------------------------------------------------------------------------------------------------
+    -- 6. по IP Burst: ссылка на item, номер заказа, даты действия, превышение, тариф, сумма.
+    --
+    PROCEDURE Detail_ip_burst( p_recordset OUT t_refc );
+    PROCEDURE Detail_ip_burst_ctrl( p_recordset OUT t_refc );
+
+END PK27_KTTK_AUDIT_2016;
+/
+CREATE OR REPLACE PACKAGE BODY PK27_KTTK_AUDIT_2016
+IS
+-- ========================================================================= --
+-- Cводные отчеты по регионам для АУДИТА (запрос К. Москалева - КАВКАЗ)
+-- ========================================================================= --
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 1. Выгружаем данные счетов
+--
+PROCEDURE Bills( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Bills';
+    v_retcode    INTEGER;
+BEGIN
+    -- удаляем старые данные 
+    DELETE FROM PK27_KTTK_BILL_T;
+    -- заполняем таблицу с данными счетов
+    INSERT INTO PK27_KTTK_BILL_T
+    select
+            B.BILL_ID,B.BILL_NO, B.BILL_DATE, B.BILL_TYPE, 
+            B.REP_PERIOD_ID, B.TOTAL, B.GROSS, B.TAX, B.CURRENCY_ID, 
+            C.CONTRACT_NO,C.DATE_FROM CONTRACT_DATE, C.DATE_TO CONTRACT_END_DATE, 
+            A.ACCOUNT_NO, COMP.COMPANY_NAME CLIENT,A.BILLING_ID  
+         from 
+        bill_t b, account_t a, contract_t c, company_t comp
+    where 
+        b.account_id = a.account_id
+        and b.contract_id = c.contract_id
+        --and TRUNC(b.bill_date) between COMP.DATE_FROM and NVL(COMP.DATE_TO,TO_DATE('01.01.2050','DD.MM.YYYY'))
+        and comp.actual (+)= 'Y'
+        and comp.contract_id (+)= c.contract_id
+        and b.rep_period_id between 201601 and 201609
+        and a.ACCOUNT_TYPE = 'J'
+        AND A.BILLING_ID IN (2001,2002,2003,2009,2004,2005,2006)
+        AND B.BILL_STATUS IN ('READY','CLOSED')
+        AND (A.STATUS = 'B' OR B.BILL_STATUS <> 'B')
+        AND A.STATUS <> 'T'
+        AND B.TOTAL <> 0
+        AND B.BILL_TYPE NOT IN ('I')        
+    ORDER BY B.REP_PERIOD_ID,B.BILL_NO;
+    -- подтверждаем изменения
+    COMMIT;
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT * FROM LL_BILL_T_20161227
+         ORDER BY REP_PERIOD_ID, BILL_NO
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 2. Выгружаем данные позиций счетов
+--
+PROCEDURE Items( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Items';
+    v_retcode    INTEGER;
+BEGIN
+    -- удаляем старые данные 
+    DELETE FROM PK27_KTTK_ITEM_T;
+    -- заполняем таблицу с данными счетов
+    INSERT INTO PK27_KTTK_ITEM_T
+    SELECT
+        B.BILL_ID,B.BILL_NO, B.BILL_TYPE, B.REP_PERIOD_ID, I.ITEM_ID, I.ITEM_TYPE, I.CHARGE_TYPE, 
+        O.ORDER_ID, O.ORDER_NO, O.DATE_FROM ORDER_DATE_FROM, O.DATE_TO ORDER_DATE_TO,
+        S.SERVICE_ID, S.SERVICE, 
+        I.ORDER_BODY_ID, SS.SUBSERVICE_ID, SS.SUBSERVICE,
+        I.REP_GROSS, I.REP_TAX,  I.BILL_TOTAL, I.TAX_INCL, I.ITEM_TOTAL, I.ITEM_CURRENCY_ID, I.ITEM_CURRENCY_RATE   
+    FROM  PK27_KTTK_BILL_T B, ITEM_T I, ORDER_T O, SERVICE_T S, SUBSERVICE_T SS
+    WHERE I.BILL_ID = B.BILL_ID    
+      AND I.ORDER_ID = O.ORDER_ID
+      AND S.SERVICE_ID = I.SERVICE_ID
+      AND SS.SUBSERVICE_ID = I.SUBSERVICE_ID
+    ORDER BY B.REP_PERIOD_ID, B.BILL_NO;
+    -- подтверждаем изменения
+    COMMIT;
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT * FROM LL_ITEM_T_20161227
+         ORDER BY REP_PERIOD_ID, BILL_NO
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 3. по фиксированным начислениям: 
+--    ссылка на item, номер заказа, даты действия. период, за который выставлен платеж, тариф, сумма, валюта.
+--
+-- абонплата
+PROCEDURE Detail_rec_fixrates( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_rec_fixrates';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT 
+               LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO,
+               LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE,
+               LL.SERVICE, LL.SUBSERVICE,
+               LL.TAX_INCL, LL.ITEM_CURRENCY_ID, LL.ITEM_TOTAL,
+               CASE
+               WHEN OB.RATE_RULE_ID IN (2402,2403,2417) THEN TO_CHAR(OB.RATE_VALUE)
+               ELSE 'нестандартный расчет абонплаты' 
+               END RATE_VALUE, 
+               OB.DATE_FROM RATEPLAN_FROM, OB.DATE_TO RATEPLAN_TO, OB.RATE_RULE_ID,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+          FROM PK27_KTTK_ITEM_T LL, ORDER_BODY_T OB
+         WHERE LL.CHARGE_TYPE = 'REC' 
+           AND LL.ORDER_BODY_ID = OB.ORDER_BODY_ID
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- доплата до минимальной стоимости
+PROCEDURE Detail_min_fixrates( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_min_fixrates';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, 
+               LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, 
+               LL.TAX_INCL, LL.ITEM_CURRENCY_ID, LL.ITEM_TOTAL,
+               NVL(TO_CHAR(OB.RATE_VALUE), 'нестандартный расчет') RATE_VALUE, 
+               OB.DATE_FROM RATEPLAN_FROM, OB.DATE_TO RATEPLAN_TO,
+               OB.RATE_RULE_ID,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+          FROM PK27_KTTK_ITEM_T LL, ORDER_BODY_T OB
+         WHERE LL.CHARGE_TYPE = 'MIN' 
+           AND LL.ORDER_BODY_ID = OB.ORDER_BODY_ID
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- -----------------------------------------------------------------------------------------------------
+-- 4. по голосовым услугам: ссылка на item, номер заказа, даты действия, направление, кол-во звонков, минут, цена, сумма, валюта.
+--
+-- клиентский трафик
+PROCEDURE Detail_clnt_voice( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_clnt_voice';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT D.REP_PERIOD_ID, D.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+               D.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, 
+               LL.SERVICE, LL.SUBSERVICE,
+               D.TERM_Z_NAME, 
+               SUM(D.CALLS) CALLS, 
+               SUM(D.MINUTES) MINUTES, 
+               SUM(D.TOTAL) TOTAL, 
+               D.TARIFF_AMOUNT, D.TARIFF_CURRENCY_ID, LL.TAX_INCL,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO   
+          FROM PK27_KTTK_ITEM_T LL, DETAIL_MMTS_T_JUR D
+         WHERE LL.REP_PERIOD_ID = D.REP_PERIOD_ID
+           AND LL.BILL_ID       = D.BILL_ID
+           AND LL.ITEM_ID       = D.ITEM_ID
+         GROUP BY D.REP_PERIOD_ID, D.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, D.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE,  
+               LL.SERVICE, LL.SUBSERVICE,
+               D.TERM_Z_NAME, 
+               TARIFF_AMOUNT, TARIFF_CURRENCY_ID, LL.TAX_INCL,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+         ORDER BY D.REP_PERIOD_ID, D.BILL_ID, D.ITEM_ID
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- проверка корректности данных
+PROCEDURE Detail_clnt_voice_ctrl( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_clnt_voice_ctrl';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        WITH RP AS (
+            SELECT D.REP_PERIOD_ID, D.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+                   D.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, 
+                   LL.SERVICE, LL.SUBSERVICE,
+                   D.TERM_Z_NAME, 
+                   SUM(D.CALLS) CALLS, 
+                   SUM(D.MINUTES) MINUTES, 
+                   SUM(D.TOTAL) TOTAL, 
+                   D.TARIFF_AMOUNT, D.TARIFF_CURRENCY_ID, LL.TAX_INCL,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO   
+              FROM PK27_KTTK_ITEM_T LL, DETAIL_MMTS_T_JUR D
+             WHERE LL.REP_PERIOD_ID = D.REP_PERIOD_ID
+               AND LL.BILL_ID       = D.BILL_ID
+               AND LL.ITEM_ID       = D.ITEM_ID
+             GROUP BY D.REP_PERIOD_ID, D.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, D.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE,  
+                   LL.SERVICE, LL.SUBSERVICE,
+                   D.TERM_Z_NAME, 
+                   TARIFF_AMOUNT, TARIFF_CURRENCY_ID, LL.TAX_INCL,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+        )
+        SELECT RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE, SUM(TOTAL), MIN(I.ITEM_TOTAL) 
+          FROM RP, ITEM_T I
+         WHERE RP.REP_PERIOD_ID = I.REP_PERIOD_ID 
+           AND RP.ITEM_ID = I.ITEM_ID
+         GROUP BY RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE
+         HAVING ABS(ROUND(SUM(TOTAL),2) - ROUND(MIN(I.ITEM_TOTAL),2)) > 1
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - -  - - - - - - - - - - - - --
+-- межоператорский трафик
+PROCEDURE Detail_oper_voice( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_oper_voice';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT DB.PERIOD_ID REP_PERIOD_ID, DB.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+               DB.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+               DB.ZONE,
+               SUM(DB.CALLS_NUM) CALLS,
+               SUM(DB.MINS) MINUTES,
+               SUM(DB.GROSS) TOTAL,
+               DB.TARIFF_MIN TARIFF_AMOUNT,
+               DB.CURRENCY_ID TARIFF_CURENCY_ID, LL.TAX_INCL,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+          FROM PK27_KTTK_ITEM_T LL, DETAIL_BSRV_T DB
+         WHERE LL.REP_PERIOD_ID = DB.PERIOD_ID
+           AND LL.BILL_ID       = DB.BILL_ID
+           AND LL.ITEM_ID       = DB.ITEM_ID
+         GROUP BY DB.PERIOD_ID, DB.BILL_ID, LL.BILL_NO, LL.BILL_TYPE,
+               DB.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+               DB.ZONE,
+               DB.TARIFF_MIN,
+               DB.CURRENCY_ID, LL.TAX_INCL,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+         ORDER BY DB.PERIOD_ID, DB.BILL_ID, DB.ITEM_ID
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- контроль
+PROCEDURE Detail_oper_voice_ctrl( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_oper_voice_ctrl';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        WITH RP AS (
+            SELECT DB.PERIOD_ID REP_PERIOD_ID, DB.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+                   DB.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+                   DB.ZONE,
+                   SUM(DB.CALLS_NUM) CALLS,
+                   SUM(DB.MINS) MINUTES,
+                   SUM(DB.GROSS) TOTAL,
+                   DB.TARIFF_MIN TARIFF_AMOUNT,
+                   DB.CURRENCY_ID TARIFF_CURENCY_ID, LL.TAX_INCL,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+              FROM PK27_KTTK_ITEM_T LL, DETAIL_BSRV_T DB
+             WHERE LL.REP_PERIOD_ID = DB.PERIOD_ID
+               AND LL.BILL_ID       = DB.BILL_ID
+               AND LL.ITEM_ID       = DB.ITEM_ID
+             GROUP BY DB.PERIOD_ID, DB.BILL_ID, LL.BILL_NO, LL.BILL_TYPE,
+                   DB.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+                   DB.ZONE,
+                   DB.TARIFF_MIN,
+                   DB.CURRENCY_ID, LL.TAX_INCL,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+        )
+        SELECT RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE, SUM(TOTAL), MIN(I.ITEM_TOTAL) 
+          FROM RP, ITEM_T I
+         WHERE RP.REP_PERIOD_ID = I.REP_PERIOD_ID 
+           AND RP.ITEM_ID = I.ITEM_ID
+         GROUP BY RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE
+         HAVING ABS(ROUND(SUM(TOTAL),2) - ROUND(MIN(I.ITEM_TOTAL),2)) > 1
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+
+-- -----------------------------------------------------------------------------------------------------
+-- 5. по IP VPN:  ссылка на item, номер заказа, даты действия, qos, зоны, объем, тариф, сумма, доплата до минималки
+--
+PROCEDURE Detail_ip_vpn( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_ip_vpn';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE,
+               LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+               SUM(CB.VOLUME) VOLUME, 
+               DU.NAME VOLUME_UNIT,
+               SUM(CB.AMOUNT) TOTAL,
+               CB.PRICE TARIFF_AMOUNT,
+               CB.CURRENCY_ID,
+               CB.TAX_INCL,
+               CB.ZONE_IN, CB.ZONE_OUT, 
+               DQ.NAME QOS,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO 
+          FROM PK27_KTTK_ITEM_T LL, BDR_CCAD_T CB, DICTIONARY_T DU, DICTIONARY_T DQ
+         WHERE LL.REP_PERIOD_ID = CB.REP_PERIOD_ID
+           AND LL.BILL_ID       = CB.BILL_ID
+           AND LL.ITEM_ID       = CB.ITEM_ID
+           AND LL.CHARGE_TYPE   = 'USG'
+           AND CB.RATE_RULE_ID NOT IN (2409, 2418)
+           AND CB.VOLUME_UNIT_ID = DU.KEY_ID
+           AND CB.QUALITY_ID    = DQ.KEY_ID(+)
+         GROUP BY LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+               LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+               DU.NAME, CB.PRICE, CB.CURRENCY_ID, CB.TAX_INCL, CB.ZONE_IN, CB.ZONE_OUT, DQ.NAME,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- контроль
+PROCEDURE Detail_ip_vpn_ctrl( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_ip_vpn_ctrl';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        WITH RP AS (
+            SELECT LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE,
+                   LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+                   SUM(CB.VOLUME) VOLUME, 
+                   DU.NAME VOLUME_UNIT,
+                   SUM(CB.AMOUNT) TOTAL,
+                   CB.PRICE TARIFF_AMOUNT,
+                   CB.CURRENCY_ID,
+                   CB.TAX_INCL,
+                   CB.ZONE_IN, CB.ZONE_OUT, 
+                   DQ.NAME QOS,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO 
+              FROM PK27_KTTK_ITEM_T LL, BDR_CCAD_T CB, DICTIONARY_T DU, DICTIONARY_T DQ
+             WHERE LL.REP_PERIOD_ID = CB.REP_PERIOD_ID
+               AND LL.BILL_ID       = CB.BILL_ID
+               AND LL.ITEM_ID       = CB.ITEM_ID
+               AND LL.CHARGE_TYPE   = 'USG'
+               AND CB.RATE_RULE_ID NOT IN (2409, 2418)
+               AND CB.VOLUME_UNIT_ID = DU.KEY_ID
+               AND CB.QUALITY_ID    = DQ.KEY_ID(+)
+             GROUP BY LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+                   LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+                   DU.NAME, CB.PRICE, CB.CURRENCY_ID, CB.TAX_INCL, CB.ZONE_IN, CB.ZONE_OUT, DQ.NAME,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+        )
+        SELECT RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE, SUM(TOTAL), MIN(I.ITEM_TOTAL) 
+          FROM RP, ITEM_T I
+         WHERE RP.REP_PERIOD_ID = I.REP_PERIOD_ID 
+           AND RP.ITEM_ID = I.ITEM_ID
+         GROUP BY RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE
+         HAVING ABS(ROUND(SUM(TOTAL),2) - ROUND(MIN(I.ITEM_TOTAL),2)) > 1
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- -----------------------------------------------------------------------------------------------------
+-- 6. по IP Burst: ссылка на item, номер заказа, даты действия, превышение, тариф, сумма.
+--
+PROCEDURE Detail_ip_burst( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_ip_burst';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        SELECT LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+               LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+               SUM(CB.EXCESS_SPEED) EXCESS_SPEED,
+               D.NAME EXCESS_SPEED_UNIT, 
+               SUM(CB.AMOUNT) TOTAL,
+               CB.PRICE TARIFF_AMOUNT,
+               CB.CURRENCY_ID,
+               CB.TAX_INCL,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+          FROM PK27_KTTK_ITEM_T LL, BDR_CCAD_T CB, DICTIONARY_T D
+         WHERE LL.REP_PERIOD_ID = CB.REP_PERIOD_ID
+           AND LL.BILL_ID       = CB.BILL_ID
+           AND LL.ITEM_ID       = CB.ITEM_ID
+           AND LL.CHARGE_TYPE   = 'USG'
+           AND CB.RATE_RULE_ID IN (2409, 2418)
+           AND CB.EXCESS_SPEED_UNIT = D.KEY_ID
+         GROUP BY LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+               LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+               D.NAME,
+               CB.PRICE,
+               CB.CURRENCY_ID,
+               CB.TAX_INCL,
+               LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+         ORDER BY LL.REP_PERIOD_ID, LL.BILL_ID, LL.ITEM_ID
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- контроль
+PROCEDURE Detail_ip_burst_ctrl( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Detail_ip_burst_ctrl';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        WITH RP AS (
+            SELECT LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+                   LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+                   SUM(CB.EXCESS_SPEED) EXCESS_SPEED,
+                   D.NAME EXCESS_SPEED_UNIT, 
+                   SUM(CB.AMOUNT) TOTAL,
+                   CB.PRICE TARIFF_AMOUNT,
+                   CB.CURRENCY_ID,
+                   CB.TAX_INCL,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+              FROM PK27_KTTK_ITEM_T LL, BDR_CCAD_T CB, DICTIONARY_T D
+             WHERE LL.REP_PERIOD_ID = CB.REP_PERIOD_ID
+               AND LL.BILL_ID       = CB.BILL_ID
+               AND LL.ITEM_ID       = CB.ITEM_ID
+               AND LL.CHARGE_TYPE   = 'USG'
+               AND CB.RATE_RULE_ID IN (2409, 2418)
+               AND CB.EXCESS_SPEED_UNIT = D.KEY_ID
+             GROUP BY LL.REP_PERIOD_ID, LL.BILL_ID, LL.BILL_NO, LL.BILL_TYPE, 
+                   LL.ITEM_ID, LL.ITEM_TYPE, LL.CHARGE_TYPE, LL.SERVICE, LL.SUBSERVICE,
+                   D.NAME,
+                   CB.PRICE,
+                   CB.CURRENCY_ID,
+                   CB.TAX_INCL,
+                   LL.ORDER_ID, LL.ORDER_NO, LL.ORDER_DATE_FROM, LL.ORDER_DATE_TO
+             ORDER BY LL.REP_PERIOD_ID, LL.BILL_ID, LL.ITEM_ID
+        )
+        SELECT RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE, SUM(TOTAL), MIN(I.ITEM_TOTAL) 
+          FROM RP, ITEM_T I
+         WHERE RP.REP_PERIOD_ID = I.REP_PERIOD_ID 
+           AND RP.ITEM_ID = I.ITEM_ID
+         GROUP BY RP.BILL_NO, RP.BILL_TYPE, RP.BILL_ID, RP.REP_PERIOD_ID, RP.ITEM_ID, I.ITEM_TYPE
+         HAVING ABS(ROUND(SUM(TOTAL),2) - ROUND(MIN(I.ITEM_TOTAL),2)) > 1
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+END PK27_KTTK_AUDIT_2016;
+/

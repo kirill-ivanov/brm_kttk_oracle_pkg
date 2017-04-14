@@ -1,0 +1,978 @@
+CREATE OR REPLACE PACKAGE PK36_BILLING_FIXRATE_OLD
+IS
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK36_BILLING_FIXRATE_OLD';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 0;
+    c_RET_ER		constant integer :=-1;
+    
+    --=============================================================================--
+    --                РАСЧЕТ НАЧИСЛЕНИЙ ПО ПРОСТЫМ ТАРИФАМ                         --
+    --=============================================================================--
+    -- Создание периодических счетов для клиентов имеющих
+    -- абонплату или доплату до минимальной стоимости
+    -- в биллинговом периоде p_period_id
+    PROCEDURE Make_bills_for_fixrates(p_period_id IN INTEGER);
+
+    -- Компенсация местного трафика вошедшего в абонплату
+    PROCEDURE Fix_ABP_traffic(p_period_id IN INTEGER, p_task_id IN INTEGER);
+
+    --  Расчет абонплаты (subscriber fee)
+    PROCEDURE Charge_ABP(p_period_id IN INTEGER, p_task_id IN INTEGER);
+
+    --  Расчет доплаты до мимнимальной суммы КОМПОМЕНТА УСЛУГИ ЗАКАЗА
+    PROCEDURE Subservice_charge_MIN(p_period_id IN INTEGER, p_task_id IN INTEGER);
+
+    --  Расчет доплаты до мимнимальной суммы ЗАКАЗА
+    PROCEDURE Order_charge_MIN(p_period_id IN INTEGER, p_task_id IN INTEGER);
+    
+    --  Расчет доплаты до мимнимальной суммы Лицевого счета
+    PROCEDURE Account_charge_MIN(p_period_id IN INTEGER, p_task_id IN INTEGER);
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Расформирование фиксированных начислений,
+    -- за исключением тех что сформировал тарификатор трафика
+    PROCEDURE Rollback_fixrates(p_period_id IN INTEGER, p_task_id IN INTEGER);
+    
+END PK36_BILLING_FIXRATE_OLD;
+/
+CREATE OR REPLACE PACKAGE BODY PK36_BILLING_FIXRATE_OLD
+IS
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Создание периодических счетов для клиентов имеющих
+-- абонплату или доплату до минимальной стоимости
+-- в биллинговом периоде p_period_id
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Make_bills_for_fixrates(p_period_id IN INTEGER)
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Make_bills_for_fixrates';
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_bill_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Создаем периодические счета в биллинговом периоде для л/с где их нет
+    v_count := 0;
+    --
+    FOR rb IN (
+      WITH AC AS (
+        SELECT ACCOUNT_ID   
+          FROM (
+            SELECT O.ACCOUNT_ID 
+              FROM FIX_RATE_T F, ORDER_T O
+             WHERE F.ORDER_ID = O.ORDER_ID
+               AND O.DATE_FROM <= v_period_to
+               AND (v_period_from <= O.DATE_TO OR O.DATE_TO IS NULL)
+               AND F.ACCOUNT_ID IS NULL
+            UNION ALL
+            SELECT F.ACCOUNT_ID   
+              FROM FIX_RATE_T F
+             WHERE F.ACCOUNT_ID IS NOT NULL 
+          )   
+          GROUP BY ACCOUNT_ID
+      )
+      SELECT AC.ACCOUNT_ID 
+        FROM AC, ACCOUNT_T A 
+       WHERE A.ACCOUNT_ID = AC.ACCOUNT_ID
+         AND A.STATUS     = Pk00_Const.c_ACC_STATUS_BILL
+         AND NOT EXISTS (
+          SELECT * FROM BILL_T B
+           WHERE B.ACCOUNT_ID    = AC.ACCOUNT_ID
+             AND B.REP_PERIOD_ID = p_period_id
+             AND B.BILL_TYPE     = PK00_CONST.c_BILL_TYPE_REC
+         )
+    )LOOP
+      v_bill_id := Pk07_BIll.Next_recuring_bill (
+               p_account_id    => rb.account_id, -- ID лицевого счета
+               p_rep_period_id => p_period_id    -- ID расчетного периода YYYYMM
+           );
+      v_count := v_count + 1;
+    END LOOP;
+    Pk01_Syslog.Write_msg('Bill_t: '||v_count||' rows created ', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Компенсация местного трафика вошедшего в абонплату
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Fix_ABP_traffic(p_period_id IN INTEGER, p_task_id IN INTEGER)
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Fix_ABP_traffic';
+    v_count         INTEGER;
+BEGIN
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- компенсируем трафик не вощедший в абонплату
+    INSERT INTO ITEM_T
+    SELECT * FROM (
+      SELECT I.BILL_ID, I.REP_PERIOD_ID, NULL ITEM_ID, I.ITEM_TYPE, NULL INV_ITEM_ID, 
+             I.ORDER_ID, I.SERVICE_ID, 
+             37 SUBSERVICE_ID,    -- возврат начислений за трафик, включенный в абонплату c_SUBSRV_BACK
+             I.CHARGE_TYPE, 
+             CASE 
+                 WHEN (PR.PRICE_0 * F.VALUE) > I.ITEM_TOTAL THEN -I.ITEM_TOTAL
+                 ELSE -(PR.PRICE_0 * F.VALUE)  
+             END ITEM_TOTAL, 
+             0 RECVD, I.DATE_FROM, I.DATE_TO, 
+             I.ITEM_STATUS, SYSDATE CREATE_DATE, SYSDATE LAST_MODIFIED, 
+             0 REP_GROSS, 0 REP_TAX, I.TAX_INCL, NULL EXTERNAL_ID, NULL NOTES
+       FROM FIX_RATE_T F, ORDER_T O,
+            TARIFF_PH.D41_TRF_HEADER TH,
+            TARIFF_PH.D42_TRF_PRICE  PR,
+            ITEM_T I
+      WHERE F.ORDER_ID = O.ORDER_ID
+        AND F.FREE_TRAFFIC IS NOT NULL
+        AND O.SERVICE_ID = Pk00_Const.c_SERVICE_CALL_LOCAL -- 125  -- Местная связь 
+        AND TH.RATEPLAN_ID = O.RATEPLAN_ID
+        AND PR.TRF_ID = TH.TRF_ID
+        AND I.ORDER_ID = O.ORDER_ID
+        AND I.SERVICE_ID = O.SERVICE_ID
+        AND I.REP_PERIOD_ID = p_period_id
+      )
+    WHERE ITEM_TOTAL != 0
+    ;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+--  Расчет абонплаты (subscriber fee)
+-- для биллингового периода p_period_id
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Charge_ABP(p_period_id IN INTEGER, p_task_id IN INTEGER)
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Charge_ABP';
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_bill_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Создаем позиции начислений на абонплату для счетов биллингового периода
+    --
+    INSERT INTO ITEM_T I(
+       BILL_ID, REP_PERIOD_ID, ITEM_ID, ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+       CHARGE_TYPE, ITEM_TOTAL, DATE_FROM, DATE_TO, TAX_INCL, ITEM_TYPE,
+       ITEM_STATUS
+    )
+    WITH ORD AS (   -- заказы, имющие компоменту услуги - АБОНПЛАТА
+        SELECT  ACCOUNT_ID, ORDER_ID, ORDER_BODY_ID, QUANTITY, VALUE, TAX_INCL, 
+                CHARGE_TYPE, SERVICE_ID, SUBSERVICE_ID,
+                DATE_FROM, DATE_TO,
+                ROUND(DATE_TO-DATE_FROM) ORD_DAYS,
+                ROUND(v_period_to - v_period_from) MON_DAYS
+          FROM (      
+            SELECT O.ACCOUNT_ID, F.ORDER_ID, F.ORDER_BODY_ID, F.QUANTITY, F.VALUE, F.TAX_INCL, 
+                   F.CHARGE_TYPE, O.SERVICE_ID, OB.SUBSERVICE_ID,
+                   CASE
+                    WHEN GREATEST(O.DATE_FROM, OB.DATE_FROM) <= v_period_from  
+                    THEN v_period_from ELSE GREATEST(O.DATE_FROM, OB.DATE_FROM) 
+                   END DATE_FROM,
+                   CASE
+                    WHEN LEAST(NVL(O.DATE_TO,v_period_to), NVL(OB.DATE_TO,v_period_to)) >= v_period_to  
+                    THEN v_period_to  ELSE LEAST(NVL(O.DATE_TO,v_period_to), NVL(OB.DATE_TO,v_period_to))
+                   END DATE_TO
+              FROM FIX_RATE_T F, ORDER_BODY_T OB, ORDER_T O
+             WHERE F.CHARGE_TYPE = Pk00_Const.c_CHARGE_TYPE_REC
+               AND F.ORDER_BODY_ID = OB.ORDER_BODY_ID
+               AND O.ORDER_ID = OB.ORDER_ID
+               AND OB.DATE_FROM   <= v_period_to
+               AND (v_period_from <= OB.DATE_TO OR OB.DATE_TO IS NULL)
+               AND O.DATE_FROM    <= v_period_to
+               AND (v_period_from <= O.DATE_TO OR O.DATE_TO IS NULL)
+            )
+    ), LCK AS (    -- блокировки, биллингового периода
+        SELECT ORDER_ID, ROUND(SUM(LOCK_DAYS)) LCK_DAYS
+          FROM (
+            SELECT ORDER_ID,
+                   CASE 
+                    -- заблокирован весь месяц:  DATE_FROM---[-------]---DATE_TO
+                    WHEN DATE_FROM <= v_period_from 
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL) 
+                     THEN v_period_to - v_period_from
+                    -- заблокирован внутри месяца: [--DATE_FROM-----DATE_TO--]
+                    WHEN v_period_from < DATE_FROM 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - DATE_FROM
+                    -- заблокирован в предыдущем периоде, открыт в текущем: ---DATE_FROM-- [---DATE_TO---]
+                    WHEN DATE_FROM <= v_period_from 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - v_period_from
+                    -- заблокирован в текущем периоде, и остается до конца периода:---[--DATE_FROM--]---DATE_TO---  
+                    WHEN v_period_from < DATE_FROM  
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL)
+                     THEN v_period_to - DATE_FROM
+                    -- возможем некорректный ввод
+                    ELSE 0
+                   END LOCK_DAYS
+              FROM ORDER_LOCK_T L
+            WHERE DATE_FROM <= v_period_to   -- только блокировки 
+              AND (DATE_TO IS NULL OR v_period_from <= DATE_TO)    -- действовавшие в периоде
+        )
+        GROUP BY ORDER_ID
+    ), ABP AS (
+        SELECT ORD.ACCOUNT_ID, ORD.ORDER_ID, ORD.ORDER_BODY_ID, 
+               ORD.QUANTITY, ORD.VALUE, ORD.TAX_INCL, 
+               ORD.CHARGE_TYPE, ORD.SERVICE_ID, ORD.SUBSERVICE_ID, 
+               ORD.DATE_FROM, ORD.DATE_TO,
+               ORD.ORD_DAYS, ORD.MON_DAYS, NVL(LCK.LCK_DAYS,0) LCK_DAYS,
+               CASE
+                WHEN ORD.ORD_DAYS < NVL(LCK.LCK_DAYS,0) THEN 1
+                ELSE ((ORD.ORD_DAYS - NVL(LCK.LCK_DAYS,0))/MON_DAYS)
+               END K_DAYS
+          FROM ORD, LCK
+         WHERE ORD.ORDER_ID = LCK.ORDER_ID(+)
+    )
+    SELECT B.BILL_ID, B.REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID,
+           ORDER_ID, SERVICE_ID, SUBSERVICE_ID, CHARGE_TYPE,  
+           ROUND((K_DAYS * QUANTITY * VALUE),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, TAX_INCL, 
+           PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN
+      FROM ABP, BILL_T B, BILLING_QUEUE_T BQ
+     WHERE ABP.ACCOUNT_ID  = B.ACCOUNT_ID
+       AND B.REP_PERIOD_ID = p_period_id
+       AND B.BILL_ID       = BQ.BILL_ID
+       AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+       AND B.BILL_TYPE     IN (Pk00_Const.c_BILL_TYPE_REC, 
+                               Pk00_Const.c_BILL_TYPE_DBT, 
+                               Pk00_Const.c_BILL_TYPE_OLD)
+       AND BQ.TASK_ID      = p_task_id
+    ;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows created ', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+--  Расчет доплаты до мимнимальной суммы КОМПОМЕНТА УСЛУГИ ЗАКАЗА
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Subservice_charge_MIN(p_period_id IN INTEGER, p_task_id IN INTEGER)
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Subservice_charge_MIN';
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_bill_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Создаем позиции начислений доплаты до мимнимальной суммы ЗАКАЗА
+    --
+    INSERT INTO ITEM_T(
+        BILL_ID, REP_PERIOD_ID, ITEM_ID, ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+        CHARGE_TYPE, ITEM_TOTAL, DATE_FROM, DATE_TO, TAX_INCL, ITEM_TYPE,
+        ITEM_STATUS
+    )
+    WITH LCK AS (
+        SELECT ORDER_ID, ROUND(SUM(LOCK_DAYS)) LCK_DAYS
+          FROM (
+            SELECT ORDER_ID,
+                   CASE 
+                    -- заблокирован весь месяц:  DATE_FROM---[-------]---DATE_TO
+                    WHEN DATE_FROM <= v_period_from 
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL) 
+                     THEN v_period_to - v_period_from
+                    -- заблокирован внутри месяца: [--DATE_FROM-----DATE_TO--]
+                    WHEN v_period_from < DATE_FROM 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - DATE_FROM
+                    -- заблокирован в предыдущем периоде, открыт в текущем: ---DATE_FROM-- [---DATE_TO---]
+                    WHEN DATE_FROM <= v_period_from 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - v_period_from
+                    -- заблокирован в текущем периоде, и остается до конца периода:---[--DATE_FROM--]---DATE_TO---  
+                    WHEN v_period_from < DATE_FROM  
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL)
+                     THEN v_period_to - DATE_FROM
+                    -- возможем некорректный ввод
+                    ELSE 0
+                   END LOCK_DAYS
+              FROM ORDER_LOCK_T L
+            WHERE DATE_FROM <= v_period_to   -- только блокировки 
+              AND (DATE_TO IS NULL OR v_period_from <= DATE_TO)    -- действовавшие в периоде
+        )
+        GROUP BY ORDER_ID
+    ), MP AS (
+        SELECT BILL_ID, REP_PERIOD_ID, ACCOUNT_ID, ORDER_ID, 
+               SERVICE_ID, SUBSERVICE_ID, CHARGE_TYPE, 
+               DATE_FROM, DATE_TO, TAX_INCL, MIN_VALUE, VAT,
+               ROUND(DATE_TO - DATE_FROM) ORD_DAYS,
+               ROUND(v_period_to - v_period_from) MON_DAYS
+          FROM ( 
+            SELECT B.BILL_ID, B.REP_PERIOD_ID, O.ACCOUNT_ID, O.ORDER_ID, 
+                   O.SERVICE_ID, OB.SUBSERVICE_ID, F.CHARGE_TYPE,
+                   CASE
+                    WHEN v_period_from <= O.DATE_FROM THEN O.DATE_FROM
+                    ELSE v_period_from
+                   END DATE_FROM, 
+                   CASE
+                    WHEN O.DATE_TO <= v_period_to THEN O.DATE_TO
+                    ELSE v_period_to
+                   END DATE_TO, 
+                   F.TAX_INCL, F.VALUE MIN_VALUE, AP.VAT 
+              FROM ORDER_T O, ORDER_BODY_T OB, FIX_RATE_T F, 
+                   BILL_T B, ACCOUNT_PROFILE_T AP, BILLING_QUEUE_T BQ
+             WHERE (v_period_from <= O.DATE_TO OR O.DATE_TO IS NULL)
+               AND O.DATE_FROM    <= v_period_to
+               AND (v_period_from <= OB.DATE_TO OR OB.DATE_TO IS NULL)
+               AND OB.DATE_FROM    <= v_period_to
+               AND F.ORDER_ID      = O.ORDER_ID
+               AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+               AND B.ACCOUNT_ID    = O.ACCOUNT_ID
+               AND F.ORDER_ID      = OB.ORDER_ID
+               AND F.ORDER_BODY_ID = OB.ORDER_BODY_ID
+               AND F.ACCOUNT_ID    IS NULL
+               AND B.ACCOUNT_ID    = AP.ACCOUNT_ID
+               AND B.REP_PERIOD_ID = p_period_id
+               AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+               AND B.BILL_ID       = BQ.BILL_ID
+               AND AP.PROFILE_ID   = BQ.PROFILE_ID
+               AND B.BILL_TYPE     IN (Pk00_Const.c_BILL_TYPE_REC, 
+                                       Pk00_Const.c_BILL_TYPE_DBT, 
+                                       Pk00_Const.c_BILL_TYPE_OLD)
+               AND BQ.TASK_ID      = p_task_id
+        )
+    ), IT AS (
+        SELECT I.BILL_ID, I.REP_PERIOD_ID, 
+               I.ORDER_ID, I.SERVICE_ID, I.SUBSERVICE_ID,
+               I.TAX_INCL, SUM(I.ITEM_TOTAL) SUM_ITEM_TOTAL
+          FROM ITEM_T I, FIX_RATE_T F, ORDER_BODY_T OB, BILLING_QUEUE_T BQ
+         WHERE F.ORDER_ID      = I.ORDER_ID
+           AND F.ORDER_BODY_ID = OB.ORDER_BODY_ID
+           AND F.ACCOUNT_ID    IS NULL
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND I.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_USG -- 'USG'    -- только трафик 
+           AND I.REP_PERIOD_ID = p_period_id
+           AND I.SUBSERVICE_ID = OB.SUBSERVICE_ID
+           AND I.BILL_ID       = BQ.BILL_ID
+           AND BQ.TASK_ID      = p_task_id
+         GROUP BY I.BILL_ID, I.REP_PERIOD_ID, 
+                  I.ORDER_ID, I.SERVICE_ID, I.SUBSERVICE_ID, I.TAX_INCL
+    ), ITM AS ( 
+      SELECT 
+           MP.ACCOUNT_ID, MP.ORDER_ID, MP.SERVICE_ID, MP.SUBSERVICE_ID,
+           MP.DATE_FROM, MP.DATE_TO, MP.CHARGE_TYPE, 
+           MP.BILL_ID, MP.REP_PERIOD_ID, 
+           NVL(IT.SUM_ITEM_TOTAL,0) SUM_ITEM_TOTAL, 
+           NVL(IT.TAX_INCL, MP.TAX_INCL) IT_TAX_INCL,
+           CASE 
+             WHEN IT.TAX_INCL = 'N' AND MP.TAX_INCL = 'Y' THEN ROUND(MP.MIN_VALUE /(1 + MP.VAT / 100),2) 
+             WHEN IT.TAX_INCL = 'Y' AND MP.TAX_INCL = 'N' THEN MP.MIN_VALUE + ROUND(MP.MIN_VALUE * MP.VAT / 100, 2)
+             ELSE MP.MIN_VALUE 
+           END MIN_VALUE,
+           NVL(LCK.LCK_DAYS,0) LCK_DAYS,
+           CASE
+            WHEN MP.ORD_DAYS < NVL(LCK.LCK_DAYS,0) THEN 1
+            ELSE ((MP.ORD_DAYS - NVL(LCK.LCK_DAYS,0))/MON_DAYS)
+           END K_DAYS
+        FROM MP, IT, LCK
+       WHERE MP.BILL_ID      = IT.BILL_ID(+)
+         AND MP.REP_PERIOD_ID= IT.REP_PERIOD_ID(+)
+         AND MP.ORDER_ID     = IT.ORDER_ID(+)
+         AND MP.SERVICE_ID   = IT.SERVICE_ID(+)
+         AND MP.SUBSERVICE_ID= IT.SUBSERVICE_ID(+)
+         AND MP.ORDER_ID     = LCK.ORDER_ID(+)
+    )
+    SELECT BILL_ID, REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID, ORDER_ID, 
+           SERVICE_ID, 
+           --Pk00_Const.c_SUBSRV_MIN SUBSERVICE_ID, -- 
+           SUBSERVICE_ID, --(решение А.Ю.Гурова)
+           CHARGE_TYPE,
+           ROUND((K_DAYS * MIN_VALUE - SUM_ITEM_TOTAL),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, IT_TAX_INCL, 
+           PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN 
+      FROM ITM
+     WHERE MIN_VALUE > SUM_ITEM_TOTAL
+    ;
+    /* старая версия - без учета блокировок
+    WITH MP AS (
+        SELECT B.BILL_ID, B.REP_PERIOD_ID, O.ACCOUNT_ID, O.ORDER_ID, 
+               O.SERVICE_ID, OB.SUBSERVICE_ID, F.CHARGE_TYPE,
+               CASE
+                WHEN v_period_from <= O.DATE_FROM THEN O.DATE_FROM
+                ELSE v_period_from
+               END DATE_FROM, 
+               CASE
+                WHEN O.DATE_TO <= v_period_to THEN O.DATE_TO
+                ELSE v_period_to
+               END DATE_TO, 
+               CASE
+                 WHEN O.DATE_FROM <= v_period_from AND  v_period_to <= O.DATE_TO  
+                   THEN 1
+                 WHEN O.DATE_FROM <= v_period_from AND  O.DATE_TO   < v_period_to 
+                   THEN  ROUND(O.DATE_TO - v_period_from)/ROUND(v_period_to - v_period_from)
+                 WHEN v_period_from < O.DATE_FROM  AND  v_period_to <= O.DATE_TO
+                   THEN  ROUND(v_period_to - O.DATE_FROM)/ROUND(v_period_to - v_period_from)
+                 WHEN v_period_from < O.DATE_FROM  AND  O.DATE_TO <= v_period_to
+                   THEN  ROUND(O.DATE_TO - O.DATE_FROM)/ROUND(v_period_to - v_period_from)
+                 ELSE 1
+               END K_DAYS,
+               F.TAX_INCL, F.VALUE MIN_VALUE, AP.VAT 
+          FROM ORDER_T O, ORDER_BODY_T OB, FIX_RATE_T F, 
+               BILL_T B, ACCOUNT_PROFILE_T AP, BILLING_QUEUE_T BQ
+         WHERE (v_period_from <= O.DATE_TO OR O.DATE_TO IS NULL)
+           AND O.DATE_FROM    <= v_period_to
+           AND F.ORDER_ID      = O.ORDER_ID
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND B.ACCOUNT_ID    = O.ACCOUNT_ID
+           AND F.ORDER_ID      = OB.ORDER_ID
+           AND F.ORDER_BODY_ID = OB.ORDER_BODY_ID
+           AND F.ACCOUNT_ID    IS NULL
+           AND B.ACCOUNT_ID    = AP.ACCOUNT_ID
+           AND B.REP_PERIOD_ID = p_period_id
+           AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+           AND B.BILL_ID       = BQ.BILL_ID
+           AND AP.PROFILE_ID   = BQ.PROFILE_ID
+           AND B.BILL_TYPE     = Pk00_Const.c_BILL_TYPE_REC
+    ), IT AS (
+        SELECT I.BILL_ID, I.REP_PERIOD_ID, 
+               I.ORDER_ID, I.SERVICE_ID, I.SUBSERVICE_ID,
+               I.TAX_INCL, SUM(I.ITEM_TOTAL) SUM_ITEM_TOTAL
+          FROM ITEM_T I, FIX_RATE_T F, BILLING_QUEUE_T BQ
+         WHERE F.ORDER_ID      = I.ORDER_ID
+           AND F.ORDER_BODY_ID IS NULL
+           AND F.ACCOUNT_ID    IS NULL
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND I.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_USG -- 'USG'    -- только трафик 
+           AND I.REP_PERIOD_ID = p_period_id
+           AND I.BILL_ID       = BQ.BILL_ID
+         GROUP BY I.BILL_ID, I.REP_PERIOD_ID, 
+                  I.ORDER_ID, I.SERVICE_ID, I.SUBSERVICE_ID, I.TAX_INCL
+    ), ITM AS ( 
+      SELECT 
+           MP.ACCOUNT_ID, MP.ORDER_ID, MP.SERVICE_ID, MP.SUBSERVICE_ID,
+           MP.DATE_FROM, MP.DATE_TO, MP.CHARGE_TYPE, 
+           MP.BILL_ID, MP.REP_PERIOD_ID, 
+           NVL(IT.SUM_ITEM_TOTAL,0) SUM_ITEM_TOTAL, 
+           NVL(IT.TAX_INCL, MP.TAX_INCL) IT_TAX_INCL,
+           CASE 
+             WHEN IT.TAX_INCL = 'N' AND MP.TAX_INCL = 'Y' THEN ROUND(MP.MIN_VALUE /(1 + MP.VAT / 100),2) 
+             WHEN IT.TAX_INCL = 'Y' AND MP.TAX_INCL = 'N' THEN MP.MIN_VALUE + ROUND(MP.MIN_VALUE * MP.VAT / 100, 2)
+             ELSE MP.MIN_VALUE 
+           END MIN_VALUE,
+           MP.K_DAYS
+        FROM MP, IT
+       WHERE MP.BILL_ID      = IT.BILL_ID(+)
+         AND MP.REP_PERIOD_ID= IT.REP_PERIOD_ID(+)
+         AND MP.ORDER_ID     = IT.ORDER_ID(+)
+         AND MP.SERVICE_ID   = IT.SERVICE_ID(+)
+         AND MP.SUBSERVICE_ID= IT.SUBSERVICE_ID(+)
+    )
+    SELECT BILL_ID, REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID, ORDER_ID, 
+           SERVICE_ID, SUBSERVICE_ID, CHARGE_TYPE,
+           ROUND((K_DAYS * MIN_VALUE - SUM_ITEM_TOTAL),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, IT_TAX_INCL, PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN 
+      FROM ITM
+     WHERE MIN_VALUE > SUM_ITEM_TOTAL
+    ;
+    */
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows created ', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+--  Расчет доплаты до мимнимальной суммы ЗАКАЗА
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Order_charge_MIN(p_period_id IN INTEGER, p_task_id IN INTEGER)
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Order_charge_MIN';
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_bill_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Создаем позиции начислений доплаты до мимнимальной суммы ЗАКАЗА
+    --
+    INSERT INTO ITEM_T(
+        BILL_ID, REP_PERIOD_ID, ITEM_ID, ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+        CHARGE_TYPE, ITEM_TOTAL, DATE_FROM, DATE_TO, TAX_INCL, ITEM_TYPE,
+        ITEM_STATUS
+    )
+    WITH LCK AS (
+        SELECT ORDER_ID, ROUND(SUM(LOCK_DAYS)) LCK_DAYS
+          FROM (
+            SELECT ORDER_ID,
+                   CASE 
+                    -- заблокирован весь месяц:  DATE_FROM---[-------]---DATE_TO
+                    WHEN DATE_FROM <= v_period_from 
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL) 
+                     THEN v_period_to - v_period_from
+                    -- заблокирован внутри месяца: [--DATE_FROM-----DATE_TO--]
+                    WHEN v_period_from < DATE_FROM 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - DATE_FROM
+                    -- заблокирован в предыдущем периоде, открыт в текущем: ---DATE_FROM-- [---DATE_TO---]
+                    WHEN DATE_FROM <= v_period_from 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - v_period_from
+                    -- заблокирован в текущем периоде, и остается до конца периода:---[--DATE_FROM--]---DATE_TO---  
+                    WHEN v_period_from < DATE_FROM  
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL)
+                     THEN v_period_to - DATE_FROM
+                    -- возможем некорректный ввод
+                    ELSE 0
+                   END LOCK_DAYS
+              FROM ORDER_LOCK_T L
+            WHERE DATE_FROM <= v_period_to   -- только блокировки 
+              AND (DATE_TO IS NULL OR v_period_from <= DATE_TO)    -- действовавшие в периоде
+        )
+        GROUP BY ORDER_ID
+    ), MP AS (
+        SELECT BILL_ID, REP_PERIOD_ID, ACCOUNT_ID, ORDER_ID, 
+               SERVICE_ID, CHARGE_TYPE, 
+               DATE_FROM, DATE_TO, TAX_INCL, MIN_VALUE, VAT,
+               ROUND(DATE_TO - DATE_FROM) ORD_DAYS,
+               ROUND(v_period_to - v_period_from) MON_DAYS
+          FROM ( 
+            SELECT B.BILL_ID, B.REP_PERIOD_ID, O.ACCOUNT_ID, O.ORDER_ID, 
+                   O.SERVICE_ID, F.CHARGE_TYPE,
+                   CASE
+                    WHEN v_period_from <= O.DATE_FROM THEN O.DATE_FROM
+                    ELSE v_period_from
+                   END DATE_FROM, 
+                   CASE
+                    WHEN O.DATE_TO <= v_period_to THEN O.DATE_TO
+                    ELSE v_period_to
+                   END DATE_TO, 
+                   F.TAX_INCL, F.VALUE MIN_VALUE, AP.VAT 
+              FROM ORDER_T O, FIX_RATE_T F, 
+                   BILL_T B, ACCOUNT_PROFILE_T AP, BILLING_QUEUE_T BQ
+             WHERE (v_period_from <= O.DATE_TO OR O.DATE_TO IS NULL)
+               AND O.DATE_FROM    <= v_period_to
+               AND F.ORDER_ID      = O.ORDER_ID
+               AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+               AND B.ACCOUNT_ID    = O.ACCOUNT_ID
+               AND F.ORDER_BODY_ID IS NULL
+               AND F.ACCOUNT_ID    IS NULL
+               AND B.ACCOUNT_ID    = AP.ACCOUNT_ID
+               AND B.REP_PERIOD_ID = p_period_id
+               AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+               AND B.BILL_ID       = BQ.BILL_ID
+               AND AP.PROFILE_ID   = BQ.PROFILE_ID
+               AND B.BILL_TYPE     IN (Pk00_Const.c_BILL_TYPE_REC, 
+                                       Pk00_Const.c_BILL_TYPE_DBT, 
+                                       Pk00_Const.c_BILL_TYPE_OLD)
+               AND BQ.TASK_ID      = p_task_id
+        )
+    ), IT AS (
+        SELECT I.BILL_ID, I.REP_PERIOD_ID, I.ORDER_ID, I.SERVICE_ID, I.TAX_INCL, SUM(I.ITEM_TOTAL) SUM_ITEM_TOTAL
+          FROM ITEM_T I, FIX_RATE_T F, BILLING_QUEUE_T BQ
+         WHERE F.ORDER_ID = I.ORDER_ID
+           AND F.ORDER_BODY_ID IS NULL
+           AND F.ACCOUNT_ID    IS NULL
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND I.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_USG -- 'USG'    -- только трафик 
+           AND I.REP_PERIOD_ID = p_period_id
+           AND I.BILL_ID       = BQ.BILL_ID
+           AND BQ.TASK_ID      = p_task_id
+         GROUP BY I.BILL_ID, I.REP_PERIOD_ID, I.ORDER_ID, I.SERVICE_ID, I.TAX_INCL
+    ), ITM AS ( 
+      SELECT 
+           MP.ACCOUNT_ID, MP.ORDER_ID, MP.SERVICE_ID, 
+           MP.DATE_FROM, MP.DATE_TO, MP.CHARGE_TYPE, 
+           MP.BILL_ID, MP.REP_PERIOD_ID, 
+           NVL(IT.SUM_ITEM_TOTAL,0) SUM_ITEM_TOTAL, 
+           NVL(IT.TAX_INCL, MP.TAX_INCL) IT_TAX_INCL,
+           CASE 
+             WHEN IT.TAX_INCL = 'N' AND MP.TAX_INCL = 'Y' THEN ROUND(MP.MIN_VALUE /(1 + MP.VAT / 100),2) 
+             WHEN IT.TAX_INCL = 'Y' AND MP.TAX_INCL = 'N' THEN MP.MIN_VALUE + ROUND(MP.MIN_VALUE * MP.VAT / 100, 2)
+             ELSE MP.MIN_VALUE 
+           END MIN_VALUE,
+           NVL(LCK.LCK_DAYS,0) LCK_DAYS,
+           CASE
+            WHEN MP.ORD_DAYS < NVL(LCK.LCK_DAYS,0) THEN 1
+            ELSE ((MP.ORD_DAYS - NVL(LCK.LCK_DAYS,0))/MON_DAYS)
+           END K_DAYS
+        FROM MP, IT, LCK
+       WHERE MP.BILL_ID      = IT.BILL_ID(+)
+         AND MP.REP_PERIOD_ID= IT.REP_PERIOD_ID(+)
+         AND MP.ORDER_ID     = IT.ORDER_ID(+)
+         AND MP.SERVICE_ID   = IT.SERVICE_ID(+)
+         AND MP.ORDER_ID     = LCK.ORDER_ID(+)
+    )
+    SELECT BILL_ID, REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID, ORDER_ID, 
+           SERVICE_ID, Pk00_Const.c_SUBSRV_MIN SUBSERVICE_ID, CHARGE_TYPE,
+           ROUND((K_DAYS * MIN_VALUE - SUM_ITEM_TOTAL),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, IT_TAX_INCL, 
+           PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN 
+      FROM ITM
+     WHERE MIN_VALUE > SUM_ITEM_TOTAL
+    ;
+    /* Старая версия - без учета блокировок
+    WITH MP AS (
+        SELECT B.BILL_ID, B.REP_PERIOD_ID, O.ACCOUNT_ID, O.ORDER_ID, O.SERVICE_ID, F.CHARGE_TYPE,
+               CASE
+                WHEN v_period_from <= O.DATE_FROM THEN O.DATE_FROM
+                ELSE v_period_from
+               END DATE_FROM, 
+               CASE
+                WHEN O.DATE_TO <= v_period_to THEN O.DATE_TO
+                ELSE v_period_to
+               END DATE_TO, 
+               CASE
+                 WHEN O.DATE_FROM <= v_period_from AND  v_period_to <= O.DATE_TO  
+                   THEN 1
+                 WHEN O.DATE_FROM <= v_period_from AND  O.DATE_TO   < v_period_to 
+                   THEN  ROUND(O.DATE_TO - v_period_from)/ROUND(v_period_to - v_period_from)
+                 WHEN v_period_from < O.DATE_FROM  AND  v_period_to <= O.DATE_TO
+                   THEN  ROUND(v_period_to - O.DATE_FROM)/ROUND(v_period_to - v_period_from)
+                 WHEN v_period_from < O.DATE_FROM  AND  O.DATE_TO <= v_period_to
+                   THEN  ROUND(O.DATE_TO - O.DATE_FROM)/ROUND(v_period_to - v_period_from)
+                 ELSE 1
+               END K_DAYS,
+               F.TAX_INCL, F.VALUE MIN_VALUE, AP.VAT 
+          FROM ORDER_T O, FIX_RATE_T F, ACCOUNT_PROFILE_T AP, 
+               BILL_T B, BILLING_QUEUE_T BQ
+         WHERE (v_period_from <= O.DATE_TO OR O.DATE_TO IS NULL)
+           AND O.DATE_FROM    <= v_period_to
+           AND F.ORDER_ID      = O.ORDER_ID
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND AP.ACCOUNT_ID   = O.ACCOUNT_ID
+           AND F.ORDER_BODY_ID IS NULL
+           AND F.ACCOUNT_ID    IS NULL
+           AND B.REP_PERIOD_ID = p_period_id
+           AND B.ACCOUNT_ID    = AP.ACCOUNT_ID
+           AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+           AND B.BILL_ID       = BQ.BILL_ID
+           AND AP.PROFILE_ID   = BQ.PROFILE_ID
+           AND B.BILL_TYPE     = Pk00_Const.c_BILL_TYPE_REC
+    ), IT AS (
+        SELECT I.BILL_ID, I.REP_PERIOD_ID, I.ORDER_ID, I.SERVICE_ID, I.TAX_INCL, SUM(I.ITEM_TOTAL) SUM_ITEM_TOTAL
+          FROM ITEM_T I, FIX_RATE_T F, BILLING_QUEUE_T BQ
+         WHERE F.ORDER_ID = I.ORDER_ID
+           AND F.ORDER_BODY_ID IS NULL
+           AND F.ACCOUNT_ID    IS NULL
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND I.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_USG -- 'USG'    -- только трафик 
+           AND I.REP_PERIOD_ID = p_period_id
+           AND I.BILL_ID       = BQ.BILL_ID
+         GROUP BY I.BILL_ID, I.REP_PERIOD_ID, I.ORDER_ID, I.SERVICE_ID, I.TAX_INCL
+    ), ITM AS ( 
+      SELECT 
+           MP.ACCOUNT_ID, MP.ORDER_ID, MP.SERVICE_ID, MP.DATE_FROM, MP.DATE_TO, MP.CHARGE_TYPE, 
+           MP.BILL_ID, MP.REP_PERIOD_ID, NVL(IT.SUM_ITEM_TOTAL,0) SUM_ITEM_TOTAL, 
+           NVL(IT.TAX_INCL, MP.TAX_INCL) IT_TAX_INCL, MP.K_DAYS,
+           CASE 
+             WHEN IT.TAX_INCL = 'N' AND MP.TAX_INCL = 'Y' THEN ROUND(MP.MIN_VALUE /(1 + MP.VAT / 100),2) 
+             WHEN IT.TAX_INCL = 'Y' AND MP.TAX_INCL = 'N' THEN MP.MIN_VALUE + ROUND(MP.MIN_VALUE * MP.VAT / 100, 2)
+             ELSE MP.MIN_VALUE 
+           END MIN_VALUE
+        FROM MP, IT
+       WHERE MP.BILL_ID      = IT.BILL_ID(+)
+         AND MP.REP_PERIOD_ID= IT.REP_PERIOD_ID(+)
+         AND MP.ORDER_ID     = IT.ORDER_ID(+)
+         AND MP.SERVICE_ID   = IT.SERVICE_ID(+)
+    )
+    SELECT BILL_ID, REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID, ORDER_ID, 
+           SERVICE_ID, Pk00_Const.c_SUBSRV_MIN SUBSERVICE_ID, CHARGE_TYPE,
+           ROUND((K_DAYS * MIN_VALUE - SUM_ITEM_TOTAL),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, IT_TAX_INCL, PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN
+      FROM ITM
+     WHERE MIN_VALUE > SUM_ITEM_TOTAL
+    ;
+    */
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows created ', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ----------------------------------------------------------------- --
+--  Расчет доплаты до мимнимальной суммы Лицевого счета
+-- ----------------------------------------------------------------- --
+PROCEDURE Account_charge_MIN(p_period_id IN INTEGER, p_task_id IN INTEGER)
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Account_charge_MIN';
+    v_period_from   DATE;
+    v_period_to     DATE;
+    v_bill_id       INTEGER;
+    v_count         INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, period_id = '||p_period_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Создаем позиции начислений доплаты до мимнимальной суммы ПЕРИОДИЧЕСКОГО СЧЕТА по Л/С
+    --
+    INSERT INTO ITEM_T(
+        BILL_ID, REP_PERIOD_ID, ITEM_ID, ORDER_ID, SERVICE_ID, SUBSERVICE_ID, 
+        CHARGE_TYPE, ITEM_TOTAL, DATE_FROM, DATE_TO, TAX_INCL, ITEM_TYPE,
+        ITEM_STATUS
+    )
+    WITH LCK AS (
+        SELECT ORDER_ID, ROUND(SUM(LOCK_DAYS)) LCK_DAYS
+          FROM (
+            SELECT ORDER_ID,
+                   CASE 
+                    -- заблокирован весь месяц:  DATE_FROM---[-------]---DATE_TO
+                    WHEN DATE_FROM <= v_period_from 
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL) 
+                     THEN v_period_to - v_period_from
+                    -- заблокирован внутри месяца: [--DATE_FROM-----DATE_TO--]
+                    WHEN v_period_from < DATE_FROM 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - DATE_FROM
+                    -- заблокирован в предыдущем периоде, открыт в текущем: ---DATE_FROM-- [---DATE_TO---]
+                    WHEN DATE_FROM <= v_period_from 
+                     AND DATE_TO < v_period_to 
+                     THEN DATE_TO - v_period_from
+                    -- заблокирован в текущем периоде, и остается до конца периода:---[--DATE_FROM--]---DATE_TO---  
+                    WHEN v_period_from < DATE_FROM  
+                     AND (v_period_to <= DATE_TO OR DATE_TO IS NULL)
+                     THEN v_period_to - DATE_FROM
+                    -- возможем некорректный ввод
+                    ELSE 0
+                   END LOCK_DAYS
+              FROM ORDER_LOCK_T L
+            WHERE DATE_FROM <= v_period_to   -- только блокировки 
+              AND (DATE_TO IS NULL OR v_period_from <= DATE_TO)    -- действовавшие в периоде
+        )
+        GROUP BY ORDER_ID
+    ), MP AS (
+        SELECT BILL_ID, REP_PERIOD_ID, ACCOUNT_ID, ORDER_ID, 
+               SERVICE_ID, CHARGE_TYPE, 
+               DATE_FROM, DATE_TO, TAX_INCL, MIN_VALUE, VAT,
+               ROUND(DATE_TO - DATE_FROM) ORD_DAYS,
+               ROUND(v_period_to - v_period_from) MON_DAYS
+          FROM ( 
+            SELECT B.BILL_ID, B.REP_PERIOD_ID, F.ACCOUNT_ID, F.ORDER_ID, 
+                   O.SERVICE_ID, F.CHARGE_TYPE,
+                   CASE
+                    WHEN v_period_from <= AP.DATE_FROM THEN AP.DATE_FROM
+                    ELSE v_period_from
+                   END DATE_FROM, 
+                   CASE
+                    WHEN AP.DATE_TO IS NULL THEN v_period_to
+                    WHEN AP.DATE_TO <= v_period_to THEN AP.DATE_TO
+                    ELSE v_period_to
+                   END DATE_TO, 
+                   F.TAX_INCL, F.VALUE MIN_VALUE, AP.VAT 
+              FROM ORDER_T O, FIX_RATE_T F, 
+                   BILL_T B, ACCOUNT_PROFILE_T AP, 
+                   BILLING_QUEUE_T BQ
+             WHERE F.ORDER_ID      = O.ORDER_ID
+               AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+               AND B.ACCOUNT_ID    = O.ACCOUNT_ID
+               AND F.ORDER_BODY_ID IS NULL
+               AND F.ACCOUNT_ID    = AP.ACCOUNT_ID
+               AND B.ACCOUNT_ID    = AP.ACCOUNT_ID
+               AND B.REP_PERIOD_ID = p_period_id
+               AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+               AND B.BILL_ID       = BQ.BILL_ID
+               AND AP.PROFILE_ID   = BQ.PROFILE_ID
+               AND B.BILL_TYPE     IN (Pk00_Const.c_BILL_TYPE_REC, 
+                                       Pk00_Const.c_BILL_TYPE_DBT, 
+                                       Pk00_Const.c_BILL_TYPE_OLD)
+               AND BQ.TASK_ID      = p_task_id
+        )
+    ), IT AS (
+        SELECT I.BILL_ID, I.REP_PERIOD_ID, I.TAX_INCL, 
+               SUM(I.ITEM_TOTAL) SUM_ITEM_TOTAL
+          FROM ITEM_T I, FIX_RATE_T F, BILLING_QUEUE_T BQ
+         WHERE F.ORDER_BODY_ID IS NULL
+           AND F.ACCOUNT_ID    = BQ.ACCOUNT_ID
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND I.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_USG -- 'USG'    -- только трафик 
+           AND I.REP_PERIOD_ID = p_period_id
+           AND I.BILL_ID       = BQ.BILL_ID
+           AND BQ.TASK_ID      = p_task_id
+         GROUP BY I.BILL_ID, I.REP_PERIOD_ID, I.TAX_INCL
+    ), ITM AS ( 
+      SELECT 
+           MP.ACCOUNT_ID, MP.ORDER_ID, MP.SERVICE_ID, 
+           MP.DATE_FROM, MP.DATE_TO, MP.CHARGE_TYPE, 
+           MP.BILL_ID, MP.REP_PERIOD_ID, 
+           NVL(IT.SUM_ITEM_TOTAL,0) SUM_ITEM_TOTAL, 
+           NVL(IT.TAX_INCL, MP.TAX_INCL) IT_TAX_INCL,
+           CASE 
+             WHEN IT.TAX_INCL = 'N' AND MP.TAX_INCL = 'Y' THEN ROUND(MP.MIN_VALUE /(1 + MP.VAT / 100),2) 
+             WHEN IT.TAX_INCL = 'Y' AND MP.TAX_INCL = 'N' THEN MP.MIN_VALUE + ROUND(MP.MIN_VALUE * MP.VAT / 100, 2)
+             ELSE MP.MIN_VALUE 
+           END MIN_VALUE,
+           NVL(LCK.LCK_DAYS,0) LCK_DAYS,
+           CASE
+            WHEN MP.ORD_DAYS < NVL(LCK.LCK_DAYS,0) THEN 1
+            ELSE ((MP.ORD_DAYS - NVL(LCK.LCK_DAYS,0))/MON_DAYS)
+           END K_DAYS
+        FROM MP, IT, LCK
+       WHERE MP.BILL_ID      = IT.BILL_ID(+)
+         AND MP.REP_PERIOD_ID= IT.REP_PERIOD_ID(+)
+         AND MP.ORDER_ID     = LCK.ORDER_ID(+)
+    )
+    SELECT BILL_ID, REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID, ORDER_ID, 
+           SERVICE_ID, Pk00_Const.c_SUBSRV_MIN SUBSERVICE_ID, CHARGE_TYPE,
+           ROUND((K_DAYS * MIN_VALUE - SUM_ITEM_TOTAL),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, IT_TAX_INCL, 
+           PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN 
+      FROM ITM
+     WHERE MIN_VALUE > SUM_ITEM_TOTAL
+    ;
+    /* Старая версия - без учета блокировок
+    WITH MP AS (
+        SELECT B.BILL_ID, B.REP_PERIOD_ID, AP.ACCOUNT_ID, F.CHARGE_TYPE,
+               CASE
+                WHEN v_period_from <= AP.DATE_FROM THEN AP.DATE_FROM
+                ELSE v_period_from
+               END DATE_FROM, 
+               CASE
+                WHEN AP.DATE_TO <= v_period_to THEN AP.DATE_TO
+                ELSE v_period_to
+               END DATE_TO, 
+               CASE
+                 WHEN AP.DATE_FROM <= v_period_from AND  v_period_to <= AP.DATE_TO  
+                   THEN 1
+                 WHEN AP.DATE_FROM <= v_period_from AND  AP.DATE_TO   < v_period_to 
+                   THEN  ROUND(AP.DATE_TO - v_period_from)/ROUND(v_period_to - v_period_from)
+                 WHEN v_period_from < AP.DATE_FROM  AND  v_period_to <= AP.DATE_TO
+                   THEN  ROUND(v_period_to - AP.DATE_FROM)/ROUND(v_period_to - v_period_from)
+                 WHEN v_period_from < AP.DATE_FROM  AND  AP.DATE_TO <= v_period_to
+                   THEN  ROUND(AP.DATE_TO - AP.DATE_FROM)/ROUND(v_period_to - v_period_from)
+                 ELSE 1                   
+               END K_DAYS,
+               F.TAX_INCL, F.VALUE MIN_VALUE, AP.VAT 
+          FROM FIX_RATE_T F, ACCOUNT_PROFILE_T AP, 
+               BILL_T B, BILLING_QUEUE_T BQ
+         WHERE (v_period_from <= AP.DATE_TO OR AP.DATE_TO IS NULL)
+           AND AP.DATE_FROM   <= v_period_to
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND F.ACCOUNT_ID    IS NOT NULL
+           AND F.ACCOUNT_ID    = AP.ACCOUNT_ID
+           AND B.ACCOUNT_ID    = AP.ACCOUNT_ID
+           AND B.ACCOUNT_ID    = BQ.ACCOUNT_ID
+           AND B.BILL_ID       = BQ.BILL_ID
+           AND B.BILL_TYPE     = Pk00_Const.c_BILL_TYPE_REC
+           AND B.REP_PERIOD_ID = p_period_id
+    ), SRV AS (
+        SELECT F.ACCOUNT_ID, O.ORDER_ID, O.SERVICE_ID
+          FROM FIX_RATE_T F, ORDER_T O
+         WHERE F.ACCOUNT_ID = O.ACCOUNT_ID 
+           AND ROWNUM = 1   -- выбираем первую попавшуюся услугу
+    ), IT AS (
+        SELECT I.BILL_ID, I.REP_PERIOD_ID, I.TAX_INCL, SUM(I.ITEM_TOTAL) SUM_ITEM_TOTAL
+          FROM ITEM_T I, FIX_RATE_T F, BILLING_QUEUE_T BQ
+         WHERE F.ORDER_ID = I.ORDER_ID
+           AND F.ORDER_BODY_ID IS NULL
+           AND F.ACCOUNT_ID    IS NULL
+           AND F.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_MIN -- 'MIN'
+           AND I.CHARGE_TYPE   = Pk00_Const.c_CHARGE_TYPE_USG -- 'USG'    -- только трафик 
+           AND I.REP_PERIOD_ID = p_period_id
+           AND I.BILL_ID       = BQ.BILL_ID
+         GROUP BY I.BILL_ID, I.REP_PERIOD_ID, I.TAX_INCL
+    ), ITM AS ( 
+      SELECT 
+           MP.ACCOUNT_ID, SRV.ORDER_ID, SRV.SERVICE_ID, MP.DATE_FROM, MP.DATE_TO, MP.CHARGE_TYPE, 
+           MP.BILL_ID, MP.REP_PERIOD_ID, NVL(IT.SUM_ITEM_TOTAL,0) SUM_ITEM_TOTAL, 
+           NVL(IT.TAX_INCL, MP.TAX_INCL) IT_TAX_INCL, 
+           CASE 
+             WHEN IT.TAX_INCL = 'N' AND MP.TAX_INCL = 'Y' THEN ROUND(MP.MIN_VALUE /(1 + MP.VAT / 100),2) 
+             WHEN IT.TAX_INCL = 'Y' AND MP.TAX_INCL = 'N' THEN MP.MIN_VALUE + ROUND(MP.MIN_VALUE * MP.VAT / 100, 2)
+             ELSE MP.MIN_VALUE 
+           END MIN_VALUE,
+           MP.K_DAYS
+        FROM MP, IT, SRV
+       WHERE MP.BILL_ID      = IT.BILL_ID(+)
+         AND MP.REP_PERIOD_ID= IT.REP_PERIOD_ID(+)
+         AND MP.ACCOUNT_ID = SRV.ACCOUNT_ID
+    )
+    SELECT BILL_ID, REP_PERIOD_ID, SQ_ITEM_ID.NEXTVAL ITEM_ID, ORDER_ID, 
+           SERVICE_ID, Pk00_Const.c_SUBSRV_MIN SUBSERVICE_ID, CHARGE_TYPE,
+           ROUND((K_DAYS * MIN_VALUE - SUM_ITEM_TOTAL),2) ITEM_TOTAL,
+           DATE_FROM, DATE_TO, IT_TAX_INCL, PK00_CONST.c_ITEM_TYPE_BILL,
+           Pk00_Const.c_ITEM_STATE_OPEN 
+      FROM ITM
+     WHERE MIN_VALUE > SUM_ITEM_TOTAL
+    ;
+    */
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('Item_t: '||v_count||' rows created ', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Расформирование фиксированных начислений,
+-- за исключением тех что сформировал тарификатор трафика
+--
+PROCEDURE Rollback_fixrates(p_period_id IN INTEGER, p_task_id IN INTEGER)
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Rollback_fixrates';
+    v_count      INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --    
+    DELETE FROM ITEM_T I
+    WHERE I.CHARGE_TYPE IN (Pk00_Const.c_CHARGE_TYPE_MIN, 
+                            Pk00_Const.c_CHARGE_TYPE_REC)
+    AND I.REP_PERIOD_ID = p_period_id
+    AND I.ITEM_STATUS = Pk00_Const.c_ITEM_STATE_OPEN
+    AND I.EXTERNAL_ID IS NULL
+    AND EXISTS (
+        SELECT * FROM BILLING_QUEUE_T Q
+         WHERE Q.BILL_ID = I.BILL_ID
+           AND Q.TASK_ID = p_task_id
+    );
+    v_count := SQL%ROWCOUNT;
+    --
+    Pk01_Syslog.Write_msg('Stop. '||v_count||' rows deleted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+END PK36_BILLING_FIXRATE_OLD;
+/

@@ -1,0 +1,834 @@
+create or replace package PK25_EXPORT_TO_1C is
+  
+type t_refc is ref cursor;
+ 
+c_PkgName     constant varchar2(30) := 'PK25_EXPORT_TO_1C';
+
+--=======================================================================
+-- Загружаем список регионов и брендов, которые на нем висят.
+-- Деление по регионам - это логическое деление (фактически регион - одна экспортная таблица в 1С)
+--=======================================================================
+PROCEDURE LOAD_GROUP_LIST(                  
+          p_recordset       OUT t_refc
+);
+
+--=======================================================================
+-- Загружаем список регионов и брендов, которые на нем висят только то, что пользователю доступкно
+-- Деление по регионам - это логическое деление (фактически регион - одна экспортная таблица в 1С)
+--=======================================================================
+PROCEDURE LOAD_GROUP_LIST_WITH_SECURITY(                  
+          p_recordset             OUT t_refc,
+          p_contractor_id_list    IN  VARCHAR2
+);
+
+--=======================================================================
+-- Создаем заголовок (header). Затем запускаем загрузку данных
+-- Версионность - если для связки бренда+период не было ранее выгрузок - VERSION      = 1, иначе - MAX(VERSION)+1
+--=======================================================================
+PROCEDURE PREPARE_DATA_FOR_EXPORT(                  
+         p_result                OUT VARCHAR2,
+         p_export_id             OUT INTEGER,
+         p_contractor_id_list    IN  VARCHAR2,
+         p_period                IN  NUMBER
+);
+
+--=======================================================================
+-- Получение списка заданий на экспорт
+--=======================================================================
+PROCEDURE LOAD_EXPORT_HEADER(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER,
+          p_contractor_list IN  VARCHAR2
+);
+
+--=======================================================================
+-- Получение списка брендов, которые висят на задании
+--=======================================================================
+PROCEDURE LOAD_EXPORT_HEADER_CONTRACTOR(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+);
+
+--=======================================================================
+-- Это формирование журнала акта светки
+--=======================================================================
+PROCEDURE LOAD_ACT_SVERKA(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+);
+
+--=======================================================================
+-- Это формирование сверки счетов
+--=======================================================================
+PROCEDURE LOAD_BILL_SVERKA(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+);
+
+--=======================================================================
+-- Формирование курсора (в данной случае должна быть одна запись) 
+-- для дальнейшей выгрузки в таблицу заголовка 1С.
+--=======================================================================
+PROCEDURE LOAD_CURSOR_FOR_EXPORT_HEADER(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+);
+
+--=======================================================================
+-- Формирование курсора (данные со строками)
+-- для дальнейшей выгрузки в таблицу 1С.
+--=======================================================================
+PROCEDURE LOAD_CURSOR_FOR_EXPORT_LINE(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+);
+
+--=======================================================================
+-- Процедура переноса данных из PINDB в UNIBILL
+--=======================================================================
+PROCEDURE IMPORT_DATA_FROM_PINDB(                  
+          p_id_pindb_from       IN NUMBER,
+          p_id_unibill_to       IN NUMBER
+);
+
+end PK25_EXPORT_TO_1C;
+/
+create or replace package body PK25_EXPORT_TO_1C is
+
+--=======================================================================
+-- Загружаем список регионов и брендов, которые на нем висят.
+-- Деление по регионам - это логическое деление (фактически регион - одна экспортная таблица в 1С)
+--=======================================================================
+PROCEDURE LOAD_GROUP_LIST(                  
+          p_recordset       OUT t_refc
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_GROUP_LIST';
+begin   
+     open p_recordset for 
+            SELECT G.GROUP_ID,
+                 G.NAME GROUP_NAME,
+                 GC.CONTRACTOR_ID,
+                 C.CONTRACTOR CONTRACTOR_NAME               
+            FROM 
+                 EXPORT_1C_GROUP_T G, 
+                 EXPORT_1C_GROUP_CONTRACTOR_T GC, 
+                 CONTRACTOR_T C
+           WHERE G.GROUP_ID = GC.GROUP_ID 
+                 AND C.CONTRACTOR_ID = GC.CONTRACTOR_ID
+        ORDER BY G.GROUP_ID, G.NAME;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Загружаем список регионов и брендов, которые на нем висят только то, что пользователю доступкно
+-- Деление по регионам - это логическое деление (фактически регион - одна экспортная таблица в 1С)
+--=======================================================================
+PROCEDURE LOAD_GROUP_LIST_WITH_SECURITY(                  
+          p_recordset             OUT t_refc,
+          p_contractor_id_list    IN  VARCHAR2
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_GROUP_LIST_WITH_SECURITY';
+    v_sql VARCHAR2(2000);
+begin   
+    v_sql := 
+           'SELECT 
+                r.GROUP_ID,
+                r.GROUP_NAME,
+                r.CONTRACTOR_ID,
+                r.CONTRACTOR_NAME 
+              FROM (
+                    SELECT r.GROUP_ID,
+                         r.NAME GROUP_NAME,
+                         C.CONTRACTOR_ID,
+                         C.CONTRACTOR CONTRACTOR_NAME, 
+                         COUNT(1) OVER (PARTITION BY R.GROUP_ID) cnt
+                    FROM EXPORT_1C_GROUP_T r, 
+                         EXPORT_1C_GROUP_CONTRACTOR_T t, 
+                         CONTRACTOR_T C
+                   WHERE R.GROUP_ID = T.GROUP_ID 
+                         AND T.CONTRACTOR_ID = C.CONTRACTOR_ID
+                         AND C.CONTRACTOR_ID IN (' || p_contractor_id_list || ')                
+                GROUP BY r.GROUP_ID,
+                         r.NAME,
+                         C.CONTRACTOR_ID,
+                         C.CONTRACTOR
+                   ) r,                  
+                   (SELECT GROUP_ID, COUNT(1) cnt
+                      FROM EXPORT_1C_GROUP_CONTRACTOR_T
+                     GROUP BY GROUP_ID
+                   ) tt
+              WHERE tt.GROUP_ID = r.GROUP_ID
+                AND tt.cnt = r.cnt
+             ORDER BY R.GROUP_ID, R.CONTRACTOR_NAME' ;
+
+     open p_recordset for v_sql;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Создаем заголовок (header). Затем запускаем загрузку данных
+-- p_contractor_id_list - список брендов через запятую
+-- Версионность - если для связки бренда+биллинговый период+отчетный период не было ранее выгрузок - VERSION = 1, иначе - MAX(VERSION)+1
+--=======================================================================
+PROCEDURE PREPARE_DATA_FOR_EXPORT(                  
+         p_result                OUT VARCHAR2,
+         p_export_id             OUT INTEGER,
+         p_contractor_id_list    IN  VARCHAR2,
+         p_period                IN  NUMBER
+)
+IS
+    v_prcName   constant varchar2(30) := 'PREPARE_DATA_FOR_EXPORT';
+    v_version    INTEGER;
+    v_id         INTEGER;
+    v_session_id VARCHAR2(100):= 'INFR' ||TO_CHAR(SYSDATE,'DDMMYY');
+    v_journal_id VARCHAR2(100):= TO_CHAR(SYSDATE,'HH24MMSS');
+    v_count      INTEGER;
+    v_group_id   NUMBER;
+    v_date_from  DATE;
+    v_date_to    DATE;    
+    lt_brand     VCHAR_COLL;
+BEGIN
+    v_date_from := Pk04_Period.Period_from(p_period);
+    v_date_to   := Pk04_Period.Period_to(p_period);    
+    --
+
+    -- Проверяем, чтобы выбранные бренды были в одном регионе
+    EXECUTE IMMEDIATE 
+      'SELECT count(distinct G.GROUP_ID) INTO :v_count
+        FROM 
+              EXPORT_1C_GROUP_T G, 
+              EXPORT_1C_GROUP_CONTRACTOR_T GC
+       WHERE G.GROUP_ID = GC.GROUP_ID
+          AND GC.CONTRACTOR_ID IN (' || p_contractor_id_list || ')' INTO v_count;
+
+    IF v_count > 1 THEN
+       p_result := 'Выбранные поставщики принадлежат разным регионам!';      
+       RETURN;
+    END IF;
+    
+    EXECUTE IMMEDIATE 
+      'SELECT distinct G.GROUP_ID INTO :v_group_id
+        FROM 
+              EXPORT_1C_GROUP_T G, 
+              EXPORT_1C_GROUP_CONTRACTOR_T GC
+       WHERE G.GROUP_ID = GC.GROUP_ID
+          AND GC.CONTRACTOR_ID IN (' || p_contractor_id_list || ')' INTO v_group_id; 
+
+    --Находим версию, с которой будем создавать 
+    SELECT NVL(MAX(VERSION),0)+1 INTO v_version
+             FROM EXPORT_1C_HEADER_T
+      WHERE GROUP_ID = v_group_id
+            AND PERIOD_ID = p_period;
+    
+    --Сохраняем заголовок в таблице
+    INSERT INTO EXPORT_1C_HEADER_T (
+        HEADER_ID,
+        PERIOD_ID,
+        GROUP_ID,
+        VERSION,
+        JOURNAL_ID,
+        SESSION_ID,
+        STATUS
+    )VALUES(
+        SQ_INV_HEADER.NEXTVAL, 
+        p_period,
+        v_group_id,
+        v_version,
+        v_session_id,
+        v_journal_id,
+        NULL
+    ) RETURNING HEADER_ID INTO v_id;
+    
+    --Создаем список брендов, которые по которым выгружаем данные
+     EXECUTE IMMEDIATE 
+            'BEGIN :l_Num := VCHAR_COLL(' || p_contractor_id_list || '); END;'
+        USING OUT lt_brand;     
+
+        FORALL i IN 1 .. lt_brand.COUNT
+            INSERT INTO EXPORT_1C_HEADER_CONTRACTOR_T (
+                HEADER_ID, CONTRACTOR_ID) 
+            VALUES (v_id, lt_brand(i));
+    
+    
+    -- Обновляем статус. Статус ставим, что начали загружать
+    UPDATE 
+        EXPORT_1C_HEADER_T
+    SET STATUS = 'PREPARE_DATA_PROCESS',
+        DATE_PREPARE_DATA = NULL
+    WHERE HEADER_ID = v_id;
+    
+    COMMIT;
+
+    -- Загружаем строки детализации        
+    INSERT INTO EXPORT_1C_LINES_T
+            (lineid,
+             header_id,
+             net_amount,
+             gross_rur,
+             due_rur,
+             tax_amount,
+             billingglcode,
+             executionperiod,
+             factureexternalid,
+             partnerid,
+             rcontractexternalid,
+             invoicestorno,
+             custname,
+             custadress,
+             inn,
+             kpp,
+             currencycode,
+             bal_gr,
+             tax_gr,
+             stringname,
+             externallineid,
+             bill_end,
+             auto_no,
+             cust_date,
+             sales_name,
+             client_sh,
+             TYPE,
+             account_no,
+             region)
+    WITH INV AS (
+        -- это базовые записи
+        SELECT A.ACCOUNT_ID, A.ACCOUNT_NO,
+               AP.CONTRACT_ID, AP.CUSTOMER_ID, AP.BRANCH_ID, AP.VAT,
+               B.REP_PERIOD_ID, B.BILL_ID, B.BILL_NO, B.BILL_DATE, 
+               B.BILL_TYPE, B.CURRENCY_ID, B.CONTRACTOR_ID,
+               II.INV_ITEM_ID, II.TOTAL, II.GROSS, II.TAX, II.SERVICE_ID,
+               II.DATE_FROM, II.DATE_TO,
+               -- контрольные поля
+               B.TOTAL BILL_TOTAL, SUM(II.TOTAL) OVER (PARTITION BY B.BILL_ID) II_SUM_TOTAL
+           FROM BILL_T B, ACCOUNT_T A, ACCOUNT_PROFILE_T AP, CONTRACTOR_T C,
+                INVOICE_ITEM_T II, EXPORT_1C_HEADER_CONTRACTOR_T EC
+         WHERE B.REP_PERIOD_ID = p_period
+           AND B.ACCOUNT_ID = A.ACCOUNT_ID 
+           AND A.BILLING_ID IN(Pk00_Const.c_BILLING_KTTK, 
+                               Pk00_Const.c_BILLING_OLD,
+                               Pk00_Const.c_BILLING_MMTS -- что не нужно отфильтруем банками 
+                              ) -- 2001, 2002, но тестовые попасть не должны
+           AND II.REP_PERIOD_ID = B.REP_PERIOD_ID
+           AND II.BILL_ID   = B.BILL_ID
+           AND A.ACCOUNT_TYPE = Pk00_Const.c_ACC_TYPE_J           
+           AND B.BILL_STATUS IN (Pk00_Const.c_BILL_STATE_READY, Pk00_Const.c_BILL_STATE_CLOSED)
+           AND (A.STATUS = Pk00_Const.c_ACC_STATUS_BILL OR B.BILL_STATUS <> Pk00_Const.c_BILL_TYPE_REC)
+           AND A.STATUS <> Pk00_Const.c_ACC_STATUS_TEST
+           AND B.TOTAL <> 0
+           AND B.PROFILE_ID = AP.PROFILE_ID
+           AND B.CONTRACTOR_ID = C.CONTRACTOR_ID
+           AND ((B.CONTRACTOR_ID = 1 AND B.CONTRACTOR_BANK_ID NOT IN (1,2)) OR (B.CONTRACTOR_ID <> 1))
+           AND EC.CONTRACTOR_ID = B.CONTRACTOR_ID
+           AND EC.HEADER_ID = v_id
+    ), SALES AS (
+        SELECT CONTRACT_ID, SALES_NAME 
+          FROM (
+          SELECT SC.CONTRACT_ID, 
+                 M.LAST_NAME||' '||SUBSTR(M.FIRST_NAME,1,1)||'.'||SUBSTR(M.MIDDLE_NAME,1,1)||'.' SALES_NAME, 
+                 ROW_NUMBER() OVER (PARTITION BY SC.CONTRACT_ID ORDER BY M.DATE_FROM DESC) RN 
+            FROM SALE_CURATOR_T SC, MANAGER_T M
+           WHERE SC.MANAGER_ID = M.MANAGER_ID
+             AND SC.CONTRACT_ID IS NOT NULL
+             AND SC.DATE_FROM < v_date_to 
+             AND (SC.DATE_TO IS NULL OR SC.DATE_TO >= v_date_from)
+        )WHERE RN = 1
+    ), ADR AS (
+        SELECT ACCOUNT_ID, CUSTADRESS
+          FROM (
+          SELECT ACCOUNT_ID, (COUNTRY|| ', ' ||CITY|| ', ' ||ADDRESS) CUSTADRESS,
+                 ROW_NUMBER() OVER (PARTITION BY ACCOUNT_ID ORDER BY DATE_FROM DESC) RN   
+            FROM ACCOUNT_CONTACT_T 
+           WHERE ADDRESS_TYPE = 'JUR'
+             AND DATE_FROM < v_date_to 
+             AND (DATE_TO IS NULL OR DATE_TO >= v_date_from)
+        )WHERE RN = 1
+    )
+    SELECT -- ------------------------------------------------------------------ --
+           ROW_NUMBER() OVER (ORDER BY C.CONTRACT_NO, INV.INV_ITEM_ID)  LINEID,
+           v_id,
+           INV.GROSS         NET_AMOUNT, 
+           INV.GROSS         GROSS_RUR, 
+           INV.TOTAL         DUE_RUR,
+           INV.TAX           TAX_AMOUNT,
+           S.ERP_PRODCODE    BILLINGGLCODE, 
+           TO_CHAR(INV.BILL_DATE,'yyyy.mm') EXECUTIONPERIOD, 
+           INV.BILL_NO       FACTUREEXTERNALID, 
+           NVL(CS.ERP_CODE,'-') PARTNERID, 
+           '-'               RCONTRACTEXTERNALID, 
+           DECODE(INV.BILL_TYPE, 'C', '1', '0' ) INVOICESTORNO, 
+           NVL(CS.CUSTOMER,'-')    CUSTNAME, 
+           NVL(ADR.CUSTADRESS,'-') CUSTADRESS, 
+           NVL(CS.INN,'-')   INN, 
+           NVL(CS.KPP,'-')   KPP, 
+           TO_CHAR(INV.CURRENCY_ID)   CURRENCYCODE, 
+           DECODE           (C.CLIENT_TYPE_ID ,6403, '62.25.11', DECODE (INV.CURRENCY_ID,810, '62.23.11',36, '62.23.11',124, '62.23.11','62.23.12')) BAL_GR, 
+           TO_CHAR(INV.VAT)  TAX_GR,
+           S.SERVICE         STRINGNAME, 
+           INV.INV_ITEM_ID   EXTERNALLINEID, 
+           INV.BILL_DATE     BILL_END, 
+           C.CONTRACT_NO     AUTO_NO, 
+           C.DATE_FROM       CUST_DATE,
+           NVL(SALES.SALES_NAME,'-') SALES_NAME,
+           NVL(CL.CLIENT_NAME,'-')   CLIENT_SH, 
+           INV.BILL_TYPE     TYPE, 
+           INV.ACCOUNT_NO    ACCOUNT_NO,                                   
+           BR.CONTRACTOR     REGION
+           -- ------------------------------------------------------------------ --
+      FROM INV, SALES, ADR, 
+           CONTRACT_T C, CUSTOMER_T CS, CONTRACTOR_T BR, SERVICE_T S, CLIENT_T CL 
+     WHERE INV.ACCOUNT_ID  = ADR.ACCOUNT_ID(+)
+       AND INV.CONTRACT_ID = SALES.CONTRACT_ID(+)
+       AND INV.CONTRACT_ID = C.CONTRACT_ID
+       AND INV.CUSTOMER_ID = CS.CUSTOMER_ID(+)
+       AND INV.BRANCH_ID   = BR.CONTRACTOR_ID(+)
+       AND INV.SERVICE_ID  = S.SERVICE_ID 
+       AND C.CLIENT_ID     = CL.CLIENT_ID(+)
+    ;
+/*   
+       select ROWNUM, t.* from (
+              SELECT                
+                 v_id,
+                 ROUND (SUM (it.due), 2) net_amount,
+                 SUM (ROUND (  DECODE (it.poid_type, '/item/cycle_tax', 0, it.due)
+                             / analytic.get_cur_rate (b.currency,810,DECODE (it.usage_type || b.TYPE,'OntM', LAST_DAY (
+                                                TRUNC (utils.infranet2date (b.rep_date),'MM')),
+                                     DECODE (it.usage_end,NULL, LAST_DAY (TRUNC (utils.infranet2date (b.rep_date),'MM')),
+                                        LAST_DAY (TRUNC (utils.infranet2date (it.usage_end),'MM')))),b.bill_no),2)) gross_rur,
+                 ROUND (SUM (ROUND (
+                    DECODE (it.poid_type, '/item/cycle_tax', 0, it.due)/ analytic.get_cur_rate (b.currency,810, DECODE (it.usage_type || b.TYPE,'OntM', LAST_DAY (TRUNC (utils.infranet2date (b.rep_date), 'MM')),
+                                    DECODE (it.usage_end,NULL, LAST_DAY (TRUNC (utils.infranet2date (b.rep_date),'MM')),
+                                       LAST_DAY (TRUNC (utils.infranet2date (it.usage_end),'MM')))),b.bill_no),2)) * DECODE (i.tax_vat, '18', 1.18, 1),2) due_rur,
+                 decode(F_GET_AX_CODE (srv.poid_id0, it.poid_id0),'0000000TAX',0, decode(i.tax_vat,'18', round(.18*round(sum(it.due),2),2),0))  tax_amount,
+                 F_GET_AX_CODE (srv.poid_id0, it.poid_id0) billingglcode,
+                 TO_CHAR (i2d (b.rep_date), 'yyyy.mm') executionperiod,
+                 b.bill_no factureexternalid,
+                 MIN (i.k_kode) partnerid,
+                 NVL (MIN (i.notes_id), '-') rcontractexternalid,
+                 DECODE (b.TYPE, 'C', 1, 0) InvoiceStorno,
+                 n.company custname,
+                 MIN (n.country) || ', ' || MIN (n.city) || ', ' || MIN (n.address) CustAdress,
+                 NVL (MIN (i.inn), ' ') inn,
+                 NVL (MIN (i.kpp), ' ') kpp,
+                 b.currency CurrencyCode,
+                 DECODE ( MIN (i.client_cat_id),3, '62.25.11', DECODE (b.currency,810, '62.23.11',36, '62.23.11',124, '62.23.11','62.23.12')) bal_gr,
+                 i.tax_vat tax_gr,
+                 NVL (F_GET_AX_SNAME (srv.poid_id0), '-') stringname,
+                 MAX (it.poid_id0) Externallineid,
+                 GREATEST (TRUNC (ADD_MONTHS (SYSDATE, -1), 'mm'), DECODE (b.TYPE,'M', TRUNC (i2d (NVL (MIN (b.akt_start), MIN (srv.sighn_when)))), TRUNC (i2d (b.end_t)) - 1)) bill_end,
+                 i.auto_no auto_no,
+                 i2d (MIN (i.cust_date)) cust_date,
+                 s.sales_name sales_name,
+                 MIN (clt.name_ru) client_sh,
+                 b.TYPE TYPE,
+                 a.account_no account_no,
+                 REPLACE (REPLACE (REPLACE (DECODE (a.gl_segment, '.', '.KTTK', a.gl_segment),'Brand',''),'Root',''),'.','')region
+            FROM bill_t b,
+                 item_t it,
+                 account_nameinfo_t n,
+                 profile_t p,
+                 contract_info_t i,
+                 sales_pers_t s,
+                 account_t a,
+                 service_t srv,
+                 clients_t clt
+           WHERE                                                   
+                 -- Базовая часть
+                 b.account_obj_id0 = a.poid_id0
+                 AND a.poid_id0 = n.obj_id0
+                 AND n.rec_id = 1
+                 AND b.bill_no IS NOT NULL
+                 AND b.due <> 0
+                 AND b.poid_id0 = it.bill_obj_id0
+                 AND it.due <> 0 and IT.POID_TYPE <> '/item/cycle_tax'
+                 AND a.poid_id0 = p.account_obj_id0
+                 AND it.service_obj_id0 = srv.poid_id0(+)
+                 AND p.poid_id0 = i.obj_id0
+                 AND clt.rec_id(+) = i.client_id
+                 AND i.sales_id = s.rec_id
+                 AND a.brand_obj_id0 IN (
+                     select BRAND_OBJ_ID FROM INV_EXPORT_1C_HEADER_BRAND
+                     WHERE EXPORT_ID = v_id
+                     )
+                 AND b.rep_date = utils.date2infranet (LAST_DAY(p_period))
+                 AND I.AUTO_NO NOT LIKE '%DA%' AND A.ACCOUNT_NO NOT LIKE 'DA%' AND SRV.LOGIN NOT LIKE '%LDA%'
+                 AND F_GET_AX_CODE (srv.poid_id0, it.poid_id0) <> '5501000300'
+        GROUP BY b.bill_no,
+                 a.account_no,
+                 a.gl_segment,
+                 b.end_t,
+                 b.TYPE,
+                 i.auto_no,
+                 n.company,
+                 b.currency,
+                 i.tax_vat,
+                 s.sales_name,
+                 b.rep_date,
+                 F_GET_AX_CODE (srv.poid_id0, it.poid_id0),
+                 F_GET_AX_SNAME (srv.poid_id0)             
+          ) t
+    );
+    */
+    
+    -- Обновляем статус. Статус ставим, что уже загрузили
+    UPDATE 
+        EXPORT_1C_HEADER_T
+    SET STATUS = 'PREPARE_DATA_OK',
+        DATE_PREPARE_DATA = SYSDATE
+    WHERE HEADER_ID = v_id;
+
+    COMMIT;
+    p_export_id := v_id;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        ROLLBACK;
+        
+        UPDATE 
+            EXPORT_1C_HEADER_T
+        SET STATUS = 'PREPARE_DATA_ERROR',
+            DATE_PREPARE_DATA = SYSDATE
+        WHERE HEADER_ID = v_id;
+        
+        COMMIT;
+        p_result := 'Ошибка!';
+END PREPARE_DATA_FOR_EXPORT;
+
+--=======================================================================
+-- Получение списка заданий на экспорт
+--=======================================================================
+PROCEDURE LOAD_EXPORT_HEADER(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER,
+          p_contractor_list IN  VARCHAR2
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_EXPORT_HEADER';
+    v_sql VARCHAR2(10000);
+begin
+    v_sql := 
+           'SELECT  t.*,
+                      R.NAME GROUP_NAME
+                FROM (SELECT HEADER_ID,
+                             PERIOD_ID,
+                             GROUP_ID,
+                             VERSION,
+                             JOURNAL_ID,
+                             SESSION_ID,
+                             STATUS,
+                             DATE_PREPARE_DATA,
+                             DATE_EXPORT_1C
+                        FROM (SELECT h.*,
+                                     ROW_NUMBER ()
+                                     OVER (PARTITION BY h.PERIOD_ID, h.GROUP_ID
+                                           ORDER BY VERSION DESC)
+                                        rn
+                                FROM EXPORT_1C_HEADER_T h)
+                       WHERE rn = 1
+                      UNION
+                      SELECT HEADER_ID,
+                             PERIOD_ID,
+                             GROUP_ID,
+                             VERSION,
+                             JOURNAL_ID,
+                             SESSION_ID,
+                             STATUS,
+                             DATE_PREPARE_DATA,
+                             DATE_EXPORT_1C
+                        FROM EXPORT_1C_HEADER_T h
+                       WHERE STATUS = ''EXPORT_DATA_OK'') t,
+                     EXPORT_1C_GROUP_T r
+               WHERE t.GROUP_ID = R.GROUP_ID';
+
+    IF (p_export_id IS NOT NULL) THEN
+        v_sql := v_sql || ' AND t.header_id = ' || p_export_id;
+    END IF;                       
+    
+    IF (p_contractor_list IS NOT NULL) THEN     
+        v_sql := v_sql || ' AND r.group_id IN (
+                            SELECT 
+                                  distinct r.GROUP_ID                
+                                FROM (
+                                      SELECT R.GROUP_ID,
+                                           R.NAME GROUP_NAME,
+                                           T.CONTRACTOR_ID,                          
+                                           COUNT(1) OVER (PARTITION BY r.GROUP_ID) cnt
+                                      FROM EXPORT_1C_GROUP_T r, 
+                                           EXPORT_1C_GROUP_CONTRACTOR_T t
+                                     WHERE r.GROUP_ID = t.GROUP_ID                          
+                                           AND t.CONTRACTOR_ID IN (' || p_contractor_list || ')                
+                                  GROUP BY r.GROUP_ID, r.NAME, T.CONTRACTOR_ID
+                                     ) r,                  
+                                     (SELECT GROUP_ID, COUNT(1) cnt
+                                        FROM EXPORT_1C_GROUP_CONTRACTOR_T
+                                       GROUP BY GROUP_ID 
+                                     ) tt
+                                WHERE tt.GROUP_ID = r.GROUP_ID
+                                  AND tt.cnt = r.cnt
+                        )';
+    END IF;
+    
+    v_sql := v_sql || ' ORDER BY t.period_id DESC, t.GROUP_ID, t.version DESC' ;
+    
+    INSERT INTO TMP_SQL_LOG(SQL) VALUES(v_sql);
+    COMMIT;
+    
+    open p_recordset for v_sql;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Получение списка брендов, которые висят на задании
+--=======================================================================
+PROCEDURE LOAD_EXPORT_HEADER_CONTRACTOR(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_EXPORT_HEADER_CONTRACTOR';
+begin
+    open p_recordset for
+        SELECT C.CONTRACTOR_ID, C.CONTRACTOR CONTRACTOR_NAME
+            FROM 
+                 EXPORT_1C_HEADER_CONTRACTOR_T H, 
+                 CONTRACTOR_T C
+           WHERE HEADER_ID = p_export_id 
+                 AND C.CONTRACTOR_ID = H.CONTRACTOR_ID
+        ;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Это формирование журнала акта светки
+--=======================================================================
+PROCEDURE LOAD_ACT_SVERKA(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_ACT_SVERKA';
+begin
+    open p_recordset for
+       SELECT ROWNUM NUM, B.*
+         FROM 
+         (
+         SELECT L.BILLINGGLCODE || ' ' || L.STRINGNAME SERVICE, -- услуга в формате бюджетный код + название, напр."5203000100 Виртуальная частная сеть (ВЧС/IP VPN)"
+                C.CURRENCY_CODE CURRENCY, 
+                L.TAX_GR TAX,
+                SUM(L.NET_AMOUNT + L.TAX_AMOUNT) TOTAL_SUMM,
+                SUM(L.NET_AMOUNT) SUMM,
+                SUM(L.TAX_AMOUNT) TAX_SUMM
+           FROM EXPORT_1C_LINES_T L, CURRENCY_T C
+          WHERE L.CURRENCYCODE = C.CURRENCY_ID(+)
+            AND L.HEADER_ID = p_export_id
+            AND L.BILLINGGLCODE != '0000000TAX'
+          GROUP BY L.BILLINGGLCODE, 
+                   L.STRINGNAME,
+                   C.CURRENCY_CODE, 
+                   L.TAX_GR
+         UNION ALL
+         SELECT NULL SERVICE, -- услуга в формате бюджетный код + название, напр."5203000100 Виртуальная частная сеть (ВЧС/IP VPN)"
+                C.CURRENCY_CODE CURRENCY, 
+                NULL TAX_GR,
+                SUM(L.NET_AMOUNT + L.TAX_AMOUNT) TOTAL_SUMM,
+                SUM(L.NET_AMOUNT) SUMM,
+                SUM(L.TAX_AMOUNT) TAX_SUMM
+           FROM EXPORT_1C_LINES_T L, CURRENCY_T C
+          WHERE L.CURRENCYCODE = C.CURRENCY_ID(+)
+            AND L.HEADER_ID = p_export_id
+            AND L.BILLINGGLCODE != '0000000TAX'
+          GROUP BY C.CURRENCY_CODE
+         ) B;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Это формирование сверки счетов
+--=======================================================================
+PROCEDURE LOAD_BILL_SVERKA(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_BILL_SVERKA';
+begin
+    open p_recordset for
+         SELECT CUSTNAME CLIENT,
+                ACCOUNT_NO,
+                AUTO_NO ORDER_NO,
+                FACTUREEXTERNALID BILL_NO,
+                GROSS_RUR GROSS,
+                STRINGNAME ITEM_NAME,
+                BILLINGGLCODE || ' ' || STRINGNAME SERVICE,
+                NULL PERCENT,
+                NULL AGENT_GROSS,
+                BILL_END ITEM_END
+           FROM EXPORT_1C_LINES_T e
+                WHERE e.HEADER_ID = p_export_id
+          ORDER BY CUSTNAME, ACCOUNT_NO, ORDER_NO;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Формирование курсора (в данной случае должна быть одна запись) 
+-- для дальнейшей выгрузки в таблицу заголовка 1С.
+--=======================================================================
+PROCEDURE LOAD_CURSOR_FOR_EXPORT_HEADER(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN  NUMBER
+)
+is
+    v_prcName   constant varchar2(30) := 'LOAD_CURSOR_FOR_EXPORT_HEADER';
+begin
+    open p_recordset for
+        SELECT h.journal_id,
+               'Ежемесячная выгрузка' TXT,
+               h.session_id,
+               ' ' SESSIONERRORLOG,
+               1 SESSIONISOK,
+               SYSDATE TRANSDATE,
+               SYSDATE SESSIONDATE
+          FROM export_1c_header_t h
+         WHERE h.header_id = p_export_id
+        ;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Формирование курсора (данные со строками)
+-- для дальнейшей выгрузки в таблицу 1С.
+--=======================================================================
+PROCEDURE LOAD_CURSOR_FOR_EXPORT_LINE(                  
+          p_recordset       OUT t_refc,
+          p_export_id       IN NUMBER
+)
+is
+    v_prcName    constant varchar2(30) := 'LOAD_CURSOR_FOR_EXPORT_LINE';
+--    v_date_from  DATE;
+--    v_date_to    DATE;
+begin
+--    v_date_from := Pk04_Period.Period_from(p_period_id);
+--    v_date_to   := Pk04_Period.Period_to(p_period_id);    
+    --
+    open p_recordset for
+       SELECT h.journal_id,
+               l.LINEID                     LINEID,
+               SYSDATE                      TRANSDATE,
+               h.session_id                 SESSIONID,
+               1                            SESSIONISOK,
+               ' '                          SESSIONERRORLOG,
+               l.BILLINGGLCODE              ITEMID,
+               SUBSTR (l.INN, 1, 12)        INN,
+               SUBSTR (l.KPP, 1, 9)         KPP,
+               SUBSTR (l.CUSTADRESS,1,250)  CUSTADDRESS,
+               SUBSTR (l.CUSTNAME, 1, 100)  CUSTNAME, 
+               l.FACTUREEXTERNALID          FACTURENUM,
+               l.EXECUTIONPERIOD            EXECUTIONPERIOD, 
+               l.CURRENCYCODE               CURRENCYCODE,
+               l.TAX_GR                     TAXGROUP, 
+               l.BILL_END                   DELIVERYDATE,
+               SUBSTR (l.EXTERNALLINEID, 1, 15) EXTERNALLINEID,
+               ROUND(l.NET_AMOUNT,0)        SUMMABEZNDS, 
+               ROUND(l.TAX_AMOUNT,0)        SUMMANDS,
+               l.CUST_DATE                  DATADOGOVORA,
+               SUBSTR(l.AUTO_NO,1,18)       NOMERDOGOVORA,
+               l.SALES_NAME                 KURATOR,
+               l.NET_AMOUNT                 SUMMABEZNDS_1, 
+               l.TAX_AMOUNT                 SUMMANDS_1,
+               SUBSTR(l.AUTO_NO,1,50)       NOMERDOGOVORA_1,
+               SUBSTR (l.CUSTNAME, 1, 499)  FULLCUSTNAME,
+               SUBSTR (l.CLIENT_SH, 1, 499) CUSTNAME_1,
+               SUBSTR(l.TYPE,1,1)           TYPESCHET,
+               l.PARTNERID                  TIPKONTRAGENTA,
+               l.PARTNERID                  KODKONTR_EISUP,                        
+               l.ACCOUNT_NO                 LSCHET,
+               SUBSTR(l.REGION,1,50)        AGENT                     
+          FROM export_1c_lines_t l, export_1c_header_t h
+         WHERE 
+                h.header_id = l.header_id 
+                AND l.billingglcode <> '0000000TAX' 
+                AND h.header_id = p_export_id
+        ;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+        if p_recordset%ISOPEN then 
+            close p_recordset;
+        end if;
+end; 
+
+--=======================================================================
+-- Процедура переноса данных из PINDB в UNIBILL
+--=======================================================================
+PROCEDURE IMPORT_DATA_FROM_PINDB(                  
+          p_id_pindb_from       IN NUMBER,
+          p_id_unibill_to       IN NUMBER
+)
+is
+    v_prcName    constant varchar2(30) := 'IMPORT_DATA_FROM_PINDB';
+begin
+    INSERT INTO PIN.EXPORT_1C_LINES_T (
+           HEADER_ID, NET_AMOUNT, GROSS_RUR, 
+           TAX_AMOUNT, BILLINGGLCODE, EXECUTIONPERIOD, 
+           FACTUREEXTERNALID, PARTNERID, RCONTRACTEXTERNALID, 
+           INVOICESTORNO, CUSTNAME, CUSTADRESS, 
+           INN, KPP, CURRENCYCODE, 
+           BAL_GR, TAX_GR, EXTERNALLINEID, 
+           BILL_END, AUTO_NO, CUST_DATE, 
+           SALES_NAME, CLIENT_SH, TYPE, 
+           ACCOUNT_NO, LINEID, DUE_RUR, 
+           STRINGNAME, REGION, CURRENCY_RATE) 
+        select p_id_unibill_to, NET_AMOUNT, GROSS_RUR, 
+           TAX_AMOUNT, BILLINGGLCODE, EXECUTIONPERIOD, 
+           FACTUREEXTERNALID, PARTNERID, RCONTRACTEXTERNALID, 
+           INVOICESTORNO, CUSTNAME, CUSTADRESS, 
+           INN, KPP, CURRENCYCODE, 
+           BAL_GR, TAX_GR, EXTERNALLINEID, 
+           BILL_END, AUTO_NO, CUST_DATE, 
+           SALES_NAME, CLIENT_SH, TYPE, 
+           ACCOUNT_NO, LINEID, DUE_RUR, 
+           STRINGNAME, REGION, CURRENCY_RATE from  INV_EXPORT_1C_LINES@PINDB   
+        WHERE ID = p_id_pindb_from ;
+exception
+    when others then
+        Pk01_SysLog.write_Error(NULL, c_PkgName||'.'||v_prcName);
+end;
+
+END PK25_EXPORT_TO_1C;
+/

@@ -1,0 +1,342 @@
+CREATE OR REPLACE PACKAGE PK12_CONTRACT
+IS
+    --
+    -- Пакет для работы с объектом "ДОГОВОР", таблицы:
+    -- contract_t
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK12_CONTRACT';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 1;
+    c_RET_ER		constant integer :=-1;
+    
+    type t_refc is ref cursor;
+    
+    -- создать новый номер договора
+    FUNCTION New_contract_no RETURN VARCHAR2;
+    
+    -- создать договор, возвращает значения
+    --   - ID клиента, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Open_contract(
+                   p_contract_no IN VARCHAR2, 
+                   p_date_from   IN DATE,
+                   p_date_to     IN DATE,
+                   p_client_id   IN INTEGER,
+                   p_manager_id  IN INTEGER
+               ) RETURN INTEGER;
+ 
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    -- открыть договор, возвращает значения
+    --   - ID клиента, 
+    --   - при ошибке выставляет исключение
+    --
+    FUNCTION Open_contract(
+               p_contract_no       IN VARCHAR2, 
+               p_date_from         IN DATE,
+               p_date_to           IN DATE,
+               p_client_id         IN INTEGER,
+               p_manager_id        IN INTEGER,
+               p_market_segment_id IN INTEGER,
+               p_client_type_id    IN INTEGER,
+               p_notes             IN VARCHAR2 DEFAULT NULL
+           ) RETURN INTEGER;   
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    -- Изменить параметры договора, возвращает значения
+    --   - при ошибке выставляет исключение 
+    PROCEDURE Edit_contract(
+                   p_contract_id IN INTEGER,
+                   p_contract_no IN VARCHAR2, 
+                   p_date_from   IN DATE,
+                   p_date_to     IN DATE,
+                   p_client_id   IN INTEGER
+               );
+    
+    -- удалить договор, возвращает значения
+    --   - при ошибке выставляет исключение
+    PROCEDURE Delete_contract(p_contract_id IN INTEGER);
+
+-- найти ID договора либо по ID, либо по началу номера (выбор с донабором)
+--   - положительное - кол-во записей
+--   - при ошибке выставляет исключение
+--
+PROCEDURE Find_contract(
+        p_recordset      OUT t_refc, 
+        p_contract_id    IN  INTEGER,
+        p_contract_no    IN  VARCHAR2
+);
+
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    -- Назначить менеджера обслуживающего договор, возвращает значение
+    -- - при ошибке выставляет исключение
+    PROCEDURE Set_manager (
+                   p_contract_id IN INTEGER,
+                   p_manager_id  IN INTEGER,
+                   p_date_from   IN DATE DEFAULT SYSDATE
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    -- Получить ID менеджера обслуживающего договор, возвращает значение
+    -- - положительное - ID менеджера
+    -- - NULL - нет данных
+    -- - при ошибке выставляет исключение
+    FUNCTION Get_manager_id (
+                   p_contract_id IN INTEGER,
+                   p_date        IN DATE DEFAULT SYSDATE
+               ) RETURN INTEGER;
+               
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+    -- Назначить менеджера обслуживающего договор, возвращает значение
+    -- - при ошибке выставляет исключение
+    PROCEDURE Set_billing_curator (
+                   p_contract_id IN INTEGER,
+                   p_manager_id  IN INTEGER
+                );
+    
+END PK12_CONTRACT;
+/
+CREATE OR REPLACE PACKAGE BODY PK12_CONTRACT
+IS
+
+-- создать новый номер договора
+FUNCTION New_contract_no RETURN VARCHAR2 IS
+    v_contract_no CONTRACT_T.CONTRACT_NO%TYPE;
+BEGIN
+    SELECT LPAD(SQ_CONTRACT_NO.NEXTVAL, 9,'0') INTO v_contract_no FROM DUAL;
+    RETURN v_contract_no;
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Более полная функция переопределена. Эту нужно будет удалить
+-- открыть договор, возвращает значения
+--   - ID клиента, 
+--   - при ошибке выставляет исключение
+--
+FUNCTION Open_contract(
+               p_contract_no IN VARCHAR2, 
+               p_date_from   IN DATE,
+               p_date_to     IN DATE,
+               p_client_id   IN INTEGER,
+               p_manager_id  IN INTEGER
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Open_contract';
+    v_contract_id INTEGER;
+BEGIN
+    INSERT INTO CONTRACT_T (
+      CONTRACT_ID, CONTRACT_NO, DATE_FROM, DATE_TO, CLIENT_ID
+    )VALUES(
+      SQ_CLIENT_ID.NEXTVAL, p_contract_no, p_date_from, p_date_to, p_client_id
+    )
+    RETURNING CONTRACT_ID INTO v_contract_id;
+    -- привязываем менеджера к договору
+    IF p_manager_id IS NOT NULL THEN
+        INSERT INTO SALE_CURATOR_T (MANAGER_ID, CONTRACT_ID, DATE_FROM, DATE_TO)
+        VALUES(p_manager_id, v_contract_id, p_date_from, p_date_to);
+    END IF;
+    --
+    RETURN v_contract_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- открыть договор, возвращает значения
+--   - ID клиента, 
+--   - при ошибке выставляет исключение
+--
+FUNCTION Open_contract(
+               p_contract_no       IN VARCHAR2, 
+               p_date_from         IN DATE,
+               p_date_to           IN DATE,
+               p_client_id         IN INTEGER,
+               p_manager_id        IN INTEGER,
+               p_market_segment_id IN INTEGER,
+               p_client_type_id    IN INTEGER,
+               p_notes             IN VARCHAR2 DEFAULT NULL
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Open_contract';
+    v_contract_id INTEGER;
+BEGIN
+    INSERT INTO CONTRACT_T (
+      CONTRACT_ID, CONTRACT_NO, DATE_FROM, DATE_TO, CLIENT_ID, 
+      MARKET_SEGMENT_ID, CLIENT_TYPE_ID, NOTES
+    )VALUES(
+      SQ_CLIENT_ID.NEXTVAL, p_contract_no, p_date_from, p_date_to, p_client_id, 
+      p_market_segment_id, p_client_type_id, p_notes
+    )
+    RETURNING CONTRACT_ID INTO v_contract_id;
+    -- привязываем менеджера к договору
+    IF p_manager_id IS NOT NULL THEN
+        INSERT INTO SALE_CURATOR_T (MANAGER_ID, CONTRACT_ID, DATE_FROM, DATE_TO)
+        VALUES(p_manager_id, v_contract_id, p_date_from, p_date_to);
+    END IF;
+    --
+    RETURN v_contract_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+  
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Изменить параметры договора, возвращает значения
+--   - при ошибке выставляет исключение
+PROCEDURE Edit_contract(
+               p_contract_id IN INTEGER,
+               p_contract_no IN VARCHAR2, 
+               p_date_from   IN DATE,
+               p_date_to     IN DATE,
+               p_client_id   IN INTEGER
+           )
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Edit_contract';
+    v_count       PLS_INTEGER;
+BEGIN
+    UPDATE CONTRACT_T 
+       SET CONTRACT_NO = NVL(p_contract_no, CONTRACT_NO), 
+             DATE_FROM = NVL(p_date_from, DATE_FROM), 
+             DATE_TO   = NVL(p_date_to, DATE_TO), 
+             CLIENT_ID = NVL(p_client_id, CLIENT_ID)
+     WHERE CONTRACT_ID = p_contract_id;  
+    v_count := SQL%ROWCOUNT;
+    IF v_count = 0 THEN
+       RAISE_APPLICATION_ERROR(Pk01_Syslog.n_APP_EXCEPTION, 'В таблице CONTRACT_T нет записи с CONTRACT_ID='||p_contract_id);
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
+-- удалить договор, возвращает значения
+--   - при ошибке выставляет исключение
+PROCEDURE Delete_contract(p_contract_id IN INTEGER)
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Delete_contract';
+BEGIN
+    DELETE FROM CONTRACT_T WHERE CONTRACT_ID = p_contract_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+  
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -  
+-- найти ID договора либо по ID, либо по началу номера (выбор с донабором)
+--   - положительное - кол-во записей
+--   - при ошибке выставляет исключение
+--
+PROCEDURE Find_contract(
+        p_recordset      OUT t_refc, 
+        p_contract_id    IN  INTEGER,
+        p_contract_no    IN  VARCHAR2
+)
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Find_contract';
+    v_retcode    INTEGER := c_RET_OK;
+BEGIN
+    IF p_contract_id IS NOT NULL THEN
+        OPEN p_recordset FOR
+             SELECT contr.CONTRACT_ID, contr.CONTRACT_NO, contr.DATE_FROM, contr.DATE_TO, 
+                    contr.CLIENT_ID,cl.CLIENT_NAME
+               FROM CONTRACT_T contr, CLIENT_T cl
+              WHERE contr.CLIENT_ID = cl.CLIENT_ID
+                    AND contr.CONTRACT_ID = p_contract_id
+              ORDER BY contr.CONTRACT_NO;
+    ELSE
+        OPEN p_recordset FOR
+             SELECT contr.CONTRACT_ID, contr.CONTRACT_NO, contr.DATE_FROM, contr.DATE_TO, 
+                    contr.CLIENT_ID,cl.CLIENT_NAME
+               FROM CONTRACT_T contr, CLIENT_T cl
+              WHERE contr.CLIENT_ID = cl.CLIENT_ID
+                    AND UPPER(CONTRACT_NO) LIKE UPPER(p_contract_no)
+              ORDER BY CONTRACT_NO;      
+    END IF;             
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Назначить менеджера обслуживающего договор, возвращает значение
+-- - при ошибке выставляет исключение
+PROCEDURE Set_manager (
+               p_contract_id IN INTEGER,
+               p_manager_id  IN INTEGER,
+               p_date_from   IN DATE DEFAULT SYSDATE
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Set_manager';
+    v_date_from  DATE := TRUNC(p_date_from);
+BEGIN
+    -- закрываем предыдущую запись
+    UPDATE SALE_CURATOR_T
+       SET DATE_TO = v_date_from - 1/86400
+     WHERE MANAGER_ID != p_manager_id
+       AND CONTRACT_ID = p_contract_id
+       AND DATE_TO IS NULL;
+    -- добавляем новую запись
+    INSERT INTO SALE_CURATOR_T (MANAGER_ID, CONTRACT_ID, DATE_FROM)
+    VALUES(p_manager_id, p_contract_id, v_date_from);
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Получить ID менеджера обслуживающего договор, возвращает значение
+-- - положительное - ID менеджера
+-- - NULL - нет данных
+-- - при ошибке выставляет исключение
+FUNCTION Get_manager_id (
+               p_contract_id IN INTEGER,
+               p_date        IN DATE DEFAULT SYSDATE
+           ) RETURN INTEGER 
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Get_manager_id';
+    v_manager_id INTEGER;
+BEGIN
+    SELECT MANAGER_ID INTO v_manager_id
+      FROM SALE_CURATOR_T
+     WHERE CONTRACT_ID = p_contract_id
+       AND p_date BETWEEN DATE_FROM AND DATE_TO;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN NO_DATA_FOUND THEN
+        RETURN NULL;
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Назначить менеджера обслуживающего договор, возвращает значение
+-- - при ошибке выставляет исключение
+PROCEDURE Set_billing_curator (
+               p_contract_id IN INTEGER,
+               p_manager_id  IN INTEGER
+            )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Set_billing_curator';
+BEGIN
+    -- добавляем новую запись
+    MERGE INTO BILLING_CURATOR_T BC
+    USING (
+      SELECT p_contract_id CONTRACT_ID, p_manager_id MANAGER_ID FROM DUAL
+    ) VR
+    ON (
+      BC.CONTRACT_ID = VR.CONTRACT_ID
+    )
+    WHEN MATCHED THEN UPDATE SET BC.MANAGER_ID = VR.MANAGER_ID
+    WHEN NOT MATCHED THEN INSERT ( BC.CONTRACT_ID, BC.MANAGER_ID ) 
+                          VALUES ( VR.CONTRACT_ID, VR.MANAGER_ID );
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+END PK12_CONTRACT;
+/

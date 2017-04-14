@@ -1,0 +1,619 @@
+CREATE OR REPLACE PACKAGE PK51_W_ACCOUNT_EXT
+IS
+    --
+    -- Пакет для поддержки импорта данных из НБ
+    -- event_t
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK51_W_ACCOUNT_EXT';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 0;
+    c_RET_ER		constant integer :=-1;
+    
+    type t_refc is ref cursor;
+
+--================================================================================================================
+-- Получение детальной информации по контракту
+    PROCEDURE CONTRACT_INFO( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_contract_id   IN NUMBER    -- номер контракта
+    );
+    
+--================================================================================================================
+-- Получение списка адресов по лицевому счету
+    PROCEDURE ACCOUNT_ADDRESS_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_date          IN DATE
+    ); 
+
+--================================================================================================================
+-- Получение всю историю адресов по лицевому счету
+    PROCEDURE ACCOUNT_ADDRESS_HISTORY_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER    -- номер лицевого счета
+    ); 
+    
+--================================================================================================================
+-- Получение заказов на лицевом счете
+    PROCEDURE ORDER_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_order_id      IN NUMBER     -- номер лицевого счета    
+    );
+--================================================================================================================
+-- Получение информации по  заказу (его начинка)
+    PROCEDURE ORDER_BODY( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_order_id      IN NUMBER    -- номер заказа
+    ); 
+--================================================================================================================
+-- Получение списка счетов
+    PROCEDURE BILL_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_bill_id       IN NUMBER,     -- номер счета         
+         p_rep_period_id IN NUMBER      -- период счета                  
+    ); 
+    
+--================================================================================================================
+-- Получение позиций счета (item-ы)
+    PROCEDURE BILL_ITEM_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_bill_id       IN NUMBER,    -- номер счета
+         p_rep_period_id IN NUMBER      -- период счета                  
+    );    
+
+--================================================================================================================
+-- Получение invoice счета
+    PROCEDURE BILL_INVOICE_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_bill_id       IN NUMBER,    -- номер счета
+         p_rep_period_id IN NUMBER      -- период счета                  
+    );
+
+--================================================================================================================
+-- Получение списка телефонов
+    PROCEDURE PHONES_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_order_id      IN NUMBER    -- номер лицевого счета         
+    );    
+ 
+--================================================================================================================
+-- Получение списка телефонов (интервалами)
+    PROCEDURE PHONES_RANGE( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_order_id      IN NUMBER    -- номер лицевого счета    
+    );       
+END PK51_W_ACCOUNT_EXT;
+/
+CREATE OR REPLACE PACKAGE BODY PK51_W_ACCOUNT_EXT
+IS
+
+-- Дополнительные основные процедуры для WEB-интерфейса
+-- Процедуры одни и те же как для физика, так и для юрика
+--================================================================================================================
+-- Получение детальной информации по контракту 
+    PROCEDURE CONTRACT_INFO( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_contract_id   IN NUMBER    -- номер контракта
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'CONTRACT_INFO';
+    v_retcode            INTEGER;
+    v_sql                VARCHAR2(10000);
+    v_date_temp          VARCHAR2(20);
+    v_cnt                INTEGER;
+begin
+    open p_recordset for
+          SELECT 
+                C.CONTRACT_ID,
+                C.CONTRACT_NO,
+                C.DATE_FROM,
+                C.DATE_TO,
+                CL.CLIENT_ID,
+                CL.CLIENT_NAME,
+                M.MANAGER_ID,
+                M.LAST_NAME || ' ' || M.FIRST_NAME || ' ' || M.MIDDLE_NAME MANAGER_NAME,
+                C.MARKET_SEGMENT_ID,
+                NULL MARKET_SEGMENT_NAME,
+                C.CLIENT_TYPE_ID,
+                NULL CLIENT_TYPE_NAME,
+                C.XTTK_TYPE_ID,
+                NULL XTTK_TYPE_NAME                
+            FROM
+               CONTRACT_T C,
+               CLIENT_T CL,
+               SALE_CURATOR_T MI,
+               MANAGER_T M
+        WHERE
+            C.CLIENT_ID = CL.CLIENT_ID
+            AND C.CONTRACT_ID = MI.CONTRACT_ID(+)
+            AND MI.MANAGER_ID = M.MANAGER_ID(+)
+            AND C.CONTRACT_ID = p_contract_id;  
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;
+
+--================================================================================================================
+-- Получение списка адресов по лицевому счету на опеределенную дату
+    PROCEDURE ACCOUNT_ADDRESS_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_date          IN DATE       -- дата, на которую нужно получить адреса
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'ACCOUNT_ADDRESS_LIST';
+    v_retcode            INTEGER;
+    v_date               DATE;
+begin
+    IF p_date IS NULL THEN
+       v_date := SYSDATE;
+    ELSE
+       v_date := p_date;
+    END IF;  
+
+    open p_recordset for
+         SELECT
+              AC.CONTACT_ID ADDRESS_ID,
+              AC.ADDRESS_TYPE,
+              AC.COUNTRY,
+              AC.ZIP,
+              AC.STATE,
+              AC.CITY,
+              AC.ADDRESS,
+              AC.DATE_FROM,
+              AC.DATE_TO,
+              AC.PERSON,
+              CASE
+                WHEN AC.ADDRESS_TYPE='DLV' THEN 0
+                  ELSE 1
+                  END SORT_ID                  
+            FROM
+                  ACCOUNT_CONTACT_T AC,
+                  ACCOUNT_T ACC
+          WHERE ACC.ACCOUNT_ID = AC.ACCOUNT_ID     
+              AND ((AC.DATE_TO IS NULL AND AC.DATE_FROM <= v_date) OR v_date BETWEEN AC.DATE_FROM AND AC.DATE_TO)
+              AND ACC.ACCOUNT_ID = p_account_id  
+              ORDER BY SORT_ID;
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;
+--================================================================================================================
+-- Получение всю историю адресов по лицевому счету
+    PROCEDURE ACCOUNT_ADDRESS_HISTORY_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER    -- номер лицевого счета
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'ACCOUNT_ADDRESS_HISTORY_LIST';
+    v_retcode            INTEGER;
+begin
+    open p_recordset for
+         SELECT
+              AC.CONTACT_ID ADDRESS_ID,
+              AC.ADDRESS_TYPE,              
+              AC.COUNTRY,
+              AC.ZIP,
+              AC.STATE,
+              AC.CITY,
+              AC.ADDRESS,
+              AC.DATE_FROM,
+              AC.DATE_TO,
+              AC.PERSON,
+              CASE
+                WHEN AC.ADDRESS_TYPE='DLV' THEN 0
+                  ELSE 1
+                  END SORT_ID                  
+            FROM
+                  ACCOUNT_CONTACT_T AC,
+                  ACCOUNT_T ACC
+          WHERE ACC.ACCOUNT_ID = AC.ACCOUNT_ID     
+              AND ACC.ACCOUNT_ID = p_account_id  
+              ORDER BY SORT_ID, DATE_FROM, DATE_TO;
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;
+
+--================================================================================================================
+-- Получение заказов на лицевом счете
+    PROCEDURE ORDER_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_order_id      IN NUMBER    -- номер лицевого счета         
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'ORDER_LIST';
+    v_retcode            INTEGER;
+    v_sql                VARCHAR2(10000);    
+begin
+    v_sql := 'SELECT 
+                 a.account_id,
+                 a.account_no,
+                 o.order_id,
+                 o.order_no,
+                 o.date_from,
+                 CASE WHEN o.DATE_TO >= TO_DATE (''01.01.2050'', ''DD.MM.YYYY'') THEN NULL
+                    ELSE o.DATE_TO END DATE_TO,
+                 o.service_id,
+                 S.SERVICE_CODE SERVICE_KEY,
+                 S.SERVICE SERVICE_NAME,
+                 S.SERVICE_SHORT SERVICE_NAME_SHORT,
+                 S.ERP_PRODCODE SERVICE_ERP_CODE,
+                 O.RATEPLAN_ID,
+                 TRF.RATEPLAN_NAME,
+                 TRF.RATESYSTEM_ID RATEPLAN_SYSTEM_ID,
+                 TRF.RATEPLAN_CODE RATEPLAN_CODE,
+                 ord_ph.CNT PHONE_COUNT,
+                 ol.LOCK_TYPE_ID,
+                 ol.LOCK_TYPE_NAME,
+                 ol.LOCK_REASON,
+                 ol.LOCKED_BY
+            FROM 
+                 account_t a,
+                 order_t o,
+                 service_t s,
+                 rateplan_t trf,
+                 (  SELECT order_Id, COUNT (phone_number) CNT
+                      FROM ORDER_PHONES_T
+                  GROUP BY ORDER_ID) ord_ph,
+                  (
+                 SELECT ord_lock.order_id, ORD_LOCK.LOCK_TYPE_ID, ORD_LOCK.LOCK_REASON,ORD_LOCK.LOCKED_BY, DICT.NAME LOCK_TYPE_NAME
+                   FROM ORDER_LOCK_T ord_lock, dictionary_t dict
+                  WHERE (SYSDATE BETWEEN ORD_LOCK.DATE_FROM AND ORD_LOCK.DATE_TO OR (ORD_LOCK.DATE_FROM<=SYSDATE AND ORD_LOCK.DATE_TO IS NULL))
+                        AND DICT.PARENT_ID = 9
+                        AND DICT.KEY_ID = ORD_LOCK.LOCK_TYPE_ID) ol
+           WHERE a.ACCOUNT_ID = o.account_Id
+                 AND O.SERVICE_ID = S.SERVICE_ID(+)
+                 AND o.order_id = ORD_PH.ORDER_ID(+)
+                 AND o.rateplan_id = TRF.RATEPLAN_ID (+)
+                 AND O.ORDER_ID = ol.ORDER_ID(+)';
+
+    IF p_account_id IS NOT NULL THEN 
+          v_sql := v_sql || ' AND o.account_id = ' || p_account_id;
+     ELSE
+          v_sql := v_sql || ' AND o.order_id = ' || p_order_id;       
+     END IF;
+     
+     open p_recordset for v_sql;
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;    
+--================================================================================================================
+-- Получение информации по  заказу (его начинка)
+    PROCEDURE ORDER_BODY( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_order_id      IN NUMBER    -- номер заказа
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'ORDER_BODY';
+    v_retcode            INTEGER;
+begin
+    open p_recordset for
+         SELECT 
+                 OB.ORDER_BODY_ID,
+                 OB.ORDER_ID,
+                 O.ORDER_NO,
+                 OB.SUBSERVICE_ID,
+                 SS.SUBSERVICE SUBSERVICE_NAME,
+                 SS.SHORTNAME SUBSERVICE_NAME_SHORT,                 
+                 SS.SUBSERVICE_KEY,
+                 OB.CHARGE_TYPE CHARGE_TYPE_ID,
+                 DICT.NAME CHARGE_TYPE,
+                 ob.date_from,
+                 CASE
+                     WHEN ob.DATE_TO >= TO_DATE ('01.01.2050', 'DD.MM.YYYY') THEN NULL
+                            ELSE ob.DATE_TO
+                         END DATE_TO
+            FROM order_t o, 
+                 order_body_t ob, 
+                 subservice_t ss,
+                 dictionary_t dict
+           WHERE     o.order_id = ob.ORDER_ID
+                 AND OB.SUBSERVICE_ID = SS.SUBSERVICE_ID
+                 AND dict.key (+)= ob.charge_type
+                 AND dict.parent_id (+)= 7
+                 AND ob.order_id = p_order_id;  
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;     
+--================================================================================================================
+-- Получение списка счетов
+    PROCEDURE BILL_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,     -- номер лицевого счета
+         p_bill_id       IN NUMBER,     -- номер счета         
+         p_rep_period_id IN NUMBER      -- период счета
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'BILL_LIST';
+    v_retcode            INTEGER;
+    v_sql                VARCHAR2(10000);
+begin
+    v_sql := 'SELECT b.bill_id,
+                   b.rep_period_id,
+                   b.bill_no,
+                   b.account_id,
+                   a.account_no,
+                   b.bill_date,
+                   b.paid_to,
+                   B.BILL_TYPE bill_type_id,
+                   dic_type.name bill_type,
+                   B.BILL_STATUS bill_status_id,
+                   dic_status.name bill_status,
+                   b.currency_id,
+                   b.total,
+                   b.recvd,
+                   b.due,
+                   b.due_date,
+                   per_dictionary.position bill_type_position
+              FROM bill_t b,
+                   account_t a,
+                   dictionary_t dic_type,
+                   dictionary_t dic_status,
+                   period_t per_dictionary
+             WHERE A.ACCOUNT_ID = B.ACCOUNT_ID
+                   AND B.REP_PERIOD_ID = PER_DICTIONARY.PERIOD_ID (+)
+                   AND DIC_TYPE.KEY(+) = B.BILL_TYPE
+                   AND dic_type.parent_id(+) = 3
+                   AND DIC_status.KEY(+) = B.BILL_STATUS
+                   AND dic_status.parent_id(+) = 4';
+    IF p_account_id IS NOT NULL THEN
+      v_sql := v_sql || ' AND A.ACCOUNT_ID = ' || p_account_id;      
+    ELSE       
+      v_sql := v_sql || ' AND B.bill_id = ' || p_bill_id || ' AND B.rep_period_id = ' || p_rep_period_id;          
+    END IF;
+    
+    open p_recordset for v_sql;         
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;      
+    
+--================================================================================================================
+-- Получение позиций счета (item-ы)
+    PROCEDURE BILL_ITEM_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_bill_id       IN NUMBER,     -- номер счета
+         p_rep_period_id IN NUMBER      -- период счета         
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'BILL_ITEM_LIST';
+    v_retcode            INTEGER;
+begin    
+    open p_recordset for
+         SELECT 
+               b.bill_id,
+               b.rep_period_id,
+               b.bill_no,
+               i.item_id,
+               i.item_type item_type_id,
+               dict_type.name item_type,
+               i.charge_type charge_type_id,
+               dict_charge_type.NAME charge_type,
+               i.item_total,
+               i.adjusted,
+               NULL TRANSFERED,--i.transfered,
+               i.recvd,               
+               i.date_from,
+               i.date_to,
+               i.item_status item_status_id,
+               dict_status.name item_status,
+               i.service_id,
+               S.SERVICE SERVICE_NAME,
+               S.SERVICE_CODE SERVICE_KEY,
+               S.SERVICE_SHORT SERVICE_NAME_SHORT,
+               S.ERP_PRODCODE SERVICE_ERP_CODE,
+               i.subservice_id,               
+               SS.SUBSERVICE SUBSERVICE_NAME,
+               SS.SHORTNAME SUBSERVICE_NAME_SHORT,               
+               SS.SUBSERVICE_KEY
+          FROM 
+               bill_t b,
+               item_t i, 
+               service_t s, 
+               subservice_t ss,
+               dictionary_t dict_type,
+               dictionary_t dict_status,              
+               dictionary_t dict_charge_type               
+         WHERE b.bill_id = i.bill_id
+               AND i.service_id = S.SERVICE_ID(+)
+               AND i.subservice_id = SS.SUBSERVICE_ID(+)
+               AND dict_charge_type.key (+)= i.CHARGE_TYPE
+               AND dict_charge_type.PARENT_ID (+)= 7
+               AND dict_type.key (+)= i.item_type
+               AND DICT_TYPE.PARENT_ID (+)= 5
+               AND dict_status.key (+)= i.item_status
+               AND dict_status.PARENT_ID (+)= 6
+               AND b.bill_id = p_bill_id
+               AND b.rep_period_id = p_rep_period_id;  
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;    
+
+--================================================================================================================
+-- Получение invoice счета
+    PROCEDURE BILL_INVOICE_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_bill_id       IN NUMBER,    -- номер счета
+         p_rep_period_id IN NUMBER     -- период счета
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'BILL_INVOICE_LIST';
+    v_retcode            INTEGER;
+begin
+    open p_recordset for
+         SELECT 
+               INV.INV_ITEM_ID,
+               INV.INV_ITEM_NAME,         
+               INV.DATE_FROM,
+               INV.DATE_TO,
+               INV.SERVICE_ID,         
+               S.SERVICE_CODE SERVICE_KEY,
+               S.SERVICE SERVICE_NAME ,
+               S.SERVICE_SHORT SERVICE_NAME_SHORT,
+               S.ERP_PRODCODE SERVICE_ERP_CODE,
+               INV.VAT,         
+               INV.TAX,
+               INV.GROSS,
+               INV.TOTAL,
+               INV.BILL_ID,
+               B.BILL_NO
+          FROM 
+              invoice_item_t inv, 
+              bill_t b, 
+              service_t s
+         WHERE B.BILL_ID = INV.BILL_ID
+               AND S.SERVICE_ID(+) = INV.SERVICE_ID
+               AND inv.bill_id = p_bill_id
+               AND b.rep_period_id = p_rep_period_id 
+         ORDER BY INV_ITEM_NO;
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;   
+
+--================================================================================================================
+-- Получение списка телефонов
+    PROCEDURE PHONES_LIST( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_order_id      IN NUMBER     -- номер лицевого счета         
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'PHONES_LIST';
+    v_retcode            INTEGER;
+begin
+    IF p_account_id IS NOT NULL THEN    
+        open p_recordset for
+            SELECT op.*
+              FROM order_phones_t op, order_t ord
+             WHERE     op.order_id = ord.order_id
+                   AND account_id = p_account_id
+                   AND (op.DATE_TO IS NULL OR SYSDATE BETWEEN op.DATE_FROM AND op.DATE_TO);
+     ELSE
+        open p_recordset for
+             SELECT *
+                FROM order_phones_t
+               WHERE order_id = p_order_id; 
+
+     END IF;               
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;  
+
+--================================================================================================================
+-- Получение списка телефонов (интервалами)
+    PROCEDURE PHONES_RANGE( 
+         p_result        OUT VARCHAR2, 
+         p_recordset     OUT t_refc, 
+         p_account_id    IN NUMBER,    -- номер лицевого счета
+         p_order_id      IN NUMBER    -- номер лицевого счета    
+    )
+IS
+    v_prcName            CONSTANT VARCHAR2(30) := 'PHONES_RANGE';
+    v_retcode            INTEGER;
+begin
+    IF p_account_id IS NOT NULL THEN    
+       open p_recordset for
+          SELECT PHONE_FROM, DECODE(PHONE_TO, PHONE_FROM, NULL, PHONE_TO) PHONE_TO
+            FROM (
+            SELECT MIN(PHONE_NUMBER) PHONE_FROM, MAX(PHONE_NUMBER) PHONE_TO 
+              FROM ORDER_PHONES_T op
+             WHERE 1=1 
+               AND (SYSDATE BETWEEN DATE_FROM AND DATE_TO OR DATE_TO IS NULL)
+               AND exists (
+                   select * from order_t ord
+                   where ord.order_id = op.order_id
+                   and account_id = p_account_id                    
+               )
+            GROUP BY (PHONE_NUMBER - ROWNUM + 1)
+        ) ORDER BY PHONE_TO;   
+     ELSE
+       open p_recordset for
+          SELECT PHONE_FROM, DECODE(PHONE_TO, PHONE_FROM, NULL, PHONE_TO) PHONE_TO
+            FROM (
+            SELECT MIN(PHONE_NUMBER) PHONE_FROM, MAX(PHONE_NUMBER) PHONE_TO 
+              FROM ORDER_PHONES_T op
+             WHERE 1=1 
+               AND SYSDATE BETWEEN DATE_FROM AND DATE_TO
+               AND ORDER_ID = p_order_id
+            GROUP BY (PHONE_NUMBER - ROWNUM + 1)
+        ) ORDER BY PHONE_TO;   
+
+     END IF;                       
+exception
+   WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+end;
+
+END PK51_W_ACCOUNT_EXT;
+/

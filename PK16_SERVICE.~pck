@@ -1,0 +1,336 @@
+CREATE OR REPLACE PACKAGE PK16_SERVICE
+IS
+    --
+    -- Пакет для работы с объектом "СПРАВОЧНИК", таблицы:
+    -- resource_t
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK16_SERVICE';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 0;
+    c_RET_ER		constant integer :=-1;
+    
+    type t_refc is ref cursor;
+    
+    -- создать новый тип услуги, возвращает значения
+    --   - положительное - ID типа услуги 
+    --   - отрицательное - id сообщения об ошибе в L01
+    FUNCTION New_service(
+                   p_service_id     IN INTEGER,  -- ID услуги задаем сами, чтобы легче было запомнить
+                   p_srv_name       IN VARCHAR2,
+                   p_srv_short_name IN VARCHAR2,
+                   p_erp_prodcode   IN VARCHAR2
+               ) RETURN INTEGER;
+
+    -- изменить описание тип услуги, возвращает значения
+    -- при ошибке выставляем исключение
+    PROCEDURE Edit_service(
+                   p_service_id     IN INTEGER,
+                   p_service        IN VARCHAR2,
+                   p_service_short  IN VARCHAR2,
+                   p_erp_prodcode   IN VARCHAR2
+               );
+
+    -- найти ID и описание сервиса по началу имени (выбор с донабором)
+    --   - положительное - кол-во записей,
+    --   - отрицательное - id сообщения об ошибе в L01
+    FUNCTION Find_service( 
+                   p_recordset OUT t_refc, 
+                   p_service    IN VARCHAR2
+                 ) RETURN INTEGER;
+
+    -- удалить тип услуги
+    --   - положительное - OK 
+    --   - отрицательное - id сообщения об ошибе в L01
+    FUNCTION Delete_service(
+                   p_service_id     IN INTEGER
+               ) RETURN INTEGER;
+
+    -- добавить псевдоним для услуги для Клиента/Договора/Лицевого счета, возвращает значения
+    --   - положительное - OK 
+    --   - отрицательное - id сообщения об ошибе в L01
+    FUNCTION Add_service_alias(
+                   p_service_id     IN INTEGER,
+                   p_account_id     IN INTEGER,
+                   p_contract_id    IN INTEGER,
+                   p_customer_id    IN INTEGER,
+                   p_srv_name       IN VARCHAR2
+               ) RETURN INTEGER;               
+    
+    -- удалить псевдоним для услуги для Клиента/Договора/Лицевого счета, возвращает значения
+    --   - положительное - OK 
+    --   - отрицательное - id сообщения об ошибе в L01
+    FUNCTION Delete_service_alias(
+                   p_service_id     IN INTEGER,
+                   p_account_id     IN INTEGER,
+                   p_contract_id    IN INTEGER,
+                   p_customer_id    IN INTEGER
+               ) RETURN INTEGER;
+               
+    -- создать новый тип компонента услуги, возвращает значения
+    -- при ошибке выставляем исключение
+    PROCEDURE New_subservice(
+                   p_subservice_id   IN INTEGER,  -- ID компонента услуги задаем сами, чтобы легче было запомнить
+                   p_subservice_key  IN VARCHAR2,
+                   p_subservice      IN VARCHAR2
+               );
+
+    -- изменить тип компонента услуги, возвращает значения
+    -- при ошибке выставляем исключение
+    PROCEDURE Edit_subservice(
+                   p_subservice_id   IN INTEGER,  -- ID компонента услуги задаем сами, чтобы легче было запомнить
+                   p_subservice_key  IN VARCHAR2,
+                   p_subservice      IN VARCHAR2
+               );
+
+    -- Получить список компонентов услуги
+    --   - положительное - кол-во записей,
+    --   - отрицательное - id сообщения об ошибе в L01
+    --
+    FUNCTION List_subservice( 
+                   p_recordset    OUT t_refc 
+               ) RETURN INTEGER;
+
+    -- удалить тип компонента услуги
+    -- при ошибке выставляем исключение 
+    PROCEDURE Delete_subservice(
+                   p_subservice_id     IN INTEGER
+               );
+               
+    
+END PK16_SERVICE;
+/
+CREATE OR REPLACE PACKAGE BODY PK16_SERVICE
+IS
+
+-- создать новый тип услуги, возвращает значения
+--   - положительное - ID типа услуги 
+--   - отрицательное - id сообщения об ошибе в L01
+FUNCTION New_service(
+               p_service_id     IN INTEGER,
+               p_srv_name       IN VARCHAR2,
+               p_srv_short_name IN VARCHAR2,
+               p_erp_prodcode   IN VARCHAR2
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'New_service';
+    v_service_id INTEGER;
+BEGIN
+    INSERT INTO SERVICE_T (SERVICE_ID, SERVICE, SERVICE_SHORT, ERP_PRODCODE)
+    VALUES(p_service_id, p_srv_name, p_srv_short_name, p_erp_prodcode)
+    RETURNING SERVICE_ID INTO v_service_id;
+    RETURN v_service_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN(-Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName));
+END;
+
+-- изменить описание типа услуги, возвращает значения
+-- при ошибке выставляем исключение
+PROCEDURE Edit_service(
+               p_service_id     IN INTEGER,
+               p_service        IN VARCHAR2,
+               p_service_short  IN VARCHAR2,
+               p_erp_prodcode   IN VARCHAR2
+           )
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Edit_service';
+BEGIN
+    UPDATE SERVICE_T 
+       SET SERVICE       = NVL(p_service, SERVICE),
+           SERVICE_SHORT = NVL(p_service_short, SERVICE_SHORT),
+           ERP_PRODCODE  = NVL(p_erp_prodcode, ERP_PRODCODE)
+     WHERE SERVICE_ID = p_service_id;  
+    IF SQL%ROWCOUNT = 0 THEN
+       RAISE_APPLICATION_ERROR(-20000, 'В таблице SERVICE_T нет записи с SERVICE_ID='||p_service_id);
+    END IF;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- найти ID и описание сервиса по началу имени (выбор с донабором)
+--   - положительное - кол-во записей,
+--   - отрицательное - id сообщения об ошибе в L01
+--
+FUNCTION Find_service( 
+               p_recordset OUT t_refc, 
+               p_service    IN VARCHAR2
+             ) RETURN INTEGER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Find_service';
+    v_retcode    INTEGER := c_RET_OK;
+BEGIN
+    SELECT COUNT(*) into v_retcode
+      FROM SERVICE_T
+     WHERE UPPER(SERVICE) LIKE UPPER(p_service)||'%';
+
+    OPEN p_recordset FOR
+         SELECT SERVICE_ID, SERVICE, SERVICE_SHORT, ERP_PRODCODE
+           FROM SERVICE_T
+          WHERE UPPER(SERVICE) LIKE UPPER(p_service)||'%'
+          ORDER BY SERVICE;
+    RETURN v_retcode;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RETURN(-v_retcode);
+END;
+
+-- удалить тип услуги
+--   - положительное - OK 
+--   - отрицательное - id сообщения об ошибе в L01
+FUNCTION Delete_service(
+               p_service_id     IN INTEGER
+           ) RETURN INTEGER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Delete_service';
+BEGIN
+    -- удаляем тип услуги, если на него есть внешние ссылки, будет вызвано исключение
+    DELETE SERVICE_T WHERE SERVICE_ID = p_service_id;
+    IF SQL%ROWCOUNT = 0 THEN
+       RAISE_APPLICATION_ERROR(-20000, 'В таблице SERVICE_T нет записи с SERVICE_ID='||p_service_id);
+    END IF;
+    RETURN c_RET_OK;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN(-Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName));
+END;
+
+-- добавить псевдоним для услуги для Клиента/Договора/Лицевого счета, возвращает значения
+--   - положительное - OK 
+--   - отрицательное - id сообщения об ошибе в L01
+FUNCTION Add_service_alias(
+               p_service_id     IN INTEGER,
+               p_account_id     IN INTEGER,
+               p_contract_id    IN INTEGER,
+               p_customer_id    IN INTEGER,
+               p_srv_name       IN VARCHAR2
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Add_service_alias';
+BEGIN
+    INSERT INTO SERVICE_ALIAS_T (SERVICE_ID, ACCOUNT_ID, CONTRACT_ID, CUSTOMER_ID, SRV_NAME)
+    VALUES(p_service_id, p_account_id, p_contract_id, p_customer_id, p_srv_name);
+    RETURN c_RET_OK;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN(-Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName));
+END;
+
+-- удалить псевдоним для услуги для Клиента/Договора/Лицевого счета, возвращает значения
+--   - положительное - OK 
+--   - отрицательное - id сообщения об ошибе в L01
+FUNCTION Delete_service_alias(
+               p_service_id     IN INTEGER,
+               p_account_id     IN INTEGER,
+               p_contract_id    IN INTEGER,
+               p_customer_id    IN INTEGER
+           ) RETURN INTEGER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Delete_service_alias';
+BEGIN
+    -- удаляем тип услуги, если на него есть внешние ссылки, будет вызвано исключение
+    DELETE SERVICE_ALIAS_T 
+     WHERE SERVICE_ID  = p_service_id
+       AND ACCOUNT_ID  = NVL(p_account_id, ACCOUNT_ID)
+       AND CONTRACT_ID = NVL(p_contract_id, CONTRACT_ID)
+       AND CUSTOMER_ID = NVL(p_customer_id, CUSTOMER_ID);
+    IF SQL%ROWCOUNT = 0 THEN
+       RAISE_APPLICATION_ERROR(-20000, 'В таблице SERVICE_T нет записи с SERVICE_ID='||p_service_id);
+    END IF;
+    RETURN c_RET_OK;
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN(-Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName));
+END;
+
+-- создать новый тип компонента услуги, возвращает значения
+-- при ошибке выставляем исключение
+PROCEDURE New_subservice(
+               p_subservice_id   IN INTEGER,  -- ID компонента услуги задаем сами, чтобы легче было запомнить
+               p_subservice_key  IN VARCHAR2,
+               p_subservice      IN VARCHAR2
+           ) 
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'New_subservice';
+BEGIN
+    INSERT INTO SUBSERVICE_T (SUBSERVICE_ID, SUBSERVICE_KEY, SUBSERVICE)
+    VALUES(p_subservice_id, p_subservice_key, p_subservice);
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- изменить тип компонента услуги, возвращает значения
+-- при ошибке выставляем исключение
+PROCEDURE Edit_subservice(
+               p_subservice_id   IN INTEGER,  -- ID компонента услуги задаем сами, чтобы легче было запомнить
+               p_subservice_key  IN VARCHAR2,
+               p_subservice      IN VARCHAR2
+           ) 
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Edit_subservice';
+BEGIN
+    UPDATE SUBSERVICE_T 
+       SET SUBSERVICE = NVL(p_subservice, SUBSERVICE),
+           SUBSERVICE_KEY = NVL(p_subservice_key, SUBSERVICE_KEY)
+     WHERE SUBSERVICE_ID  = p_subservice_id;  
+    IF SQL%ROWCOUNT = 0 THEN
+       RAISE_APPLICATION_ERROR(-20000, 'В таблице SUBSERVICE_T нет записи с SUBSERVICE_ID='||p_subservice_id);
+    END IF;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- Получить список компонентов услуги
+--   - положительное - кол-во записей,
+--   - отрицательное - id сообщения об ошибе в L01
+--
+FUNCTION List_subservice( 
+               p_recordset    OUT t_refc 
+             ) RETURN INTEGER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'List_subservice';
+    v_retcode    INTEGER := c_RET_OK;
+BEGIN
+    SELECT COUNT(*) INTO v_retcode FROM SUBSERVICE_T;
+
+    OPEN p_recordset FOR
+         SELECT SUBSERVICE_ID, SUBSERVICE_KEY, SUBSERVICE
+           FROM SUBSERVICE_T
+          ORDER BY SUBSERVICE;
+    RETURN v_retcode;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RETURN(-v_retcode);
+END;
+
+-- удалить тип компонента услуги
+-- при ошибке выставляем исключение 
+PROCEDURE Delete_subservice(
+               p_subservice_id     IN INTEGER
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Delete_subservice';
+BEGIN
+    -- удаляем тип услуги, если на него есть внешние ссылки, будет вызвано исключение
+    DELETE FROM SUBSERVICE_T WHERE SUBSERVICE_ID = p_subservice_id;
+    IF SQL%ROWCOUNT = 0 THEN
+       RAISE_APPLICATION_ERROR(-20000, 'В таблице SUBSERV_T нет записи с SUBSERV_ID='||p_subservice_id);
+    END IF;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+END PK16_SERVICE;
+/

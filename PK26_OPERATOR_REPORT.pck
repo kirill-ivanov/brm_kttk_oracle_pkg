@@ -1,0 +1,399 @@
+CREATE OR REPLACE PACKAGE PK26_OPERATOR_REPORT
+IS
+    --
+    -- CВОДНЫЕ ОТЧЕТЫ по операторам местного и зонового присоединения
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK26_OPERATOR_REPORT';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 0;
+    c_RET_ER		constant integer :=-1;
+    
+    type t_refc is ref cursor;
+    -- Услуги присоединения и пропуска трафика на местном и/или зоновом уровне
+    c_SERVICE_OPLOCL CONSTANT INTEGER := 7;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 1. Список брендов операторов
+    --
+    PROCEDURE Branch_List( 
+                   p_recordset    OUT t_refc,
+                   p_period_id    IN INTEGER
+               );    
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 2. Список договоров операторов 
+    --
+    PROCEDURE Contract_List( 
+                   p_recordset    OUT t_refc
+               );
+
+    -- ========================================================================= --
+    --                    С В О Д Н Ы Е   О Т Ч Е Т Ы
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 3. Д О Х О Д
+    PROCEDURE Export_revenue(
+                   p_recordset      OUT t_refc,
+                   p_contractor_id  IN VARCHAR2,
+                   p_period_id      IN INTEGER
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 4. Р А С Х О Д
+    PROCEDURE Export_debt( 
+                   p_recordset    OUT t_refc,
+                   p_contractor_id  IN VARCHAR2,
+                   p_period_id      IN INTEGER
+               );
+
+END PK26_OPERATOR_REPORT;
+/
+CREATE OR REPLACE PACKAGE BODY PK26_OPERATOR_REPORT
+IS
+-- ========================================================================= --
+-- Cводные отчеты по операторам местного и зонового присоединения
+-- ========================================================================= --
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 1. Список брендов операторов
+--
+PROCEDURE Branch_List( 
+               p_recordset    OUT t_refc,
+               p_period_id    IN INTEGER
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Branch_List';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR    
+        WITH CL AS (
+            SELECT A.ACCOUNT_ID, C.CONTRACT_ID, C.CONTRACT_NO,
+                   CT.CONTRACTOR_ID, CT.CONTRACTOR, 
+                   CS.CUSTOMER_ID, CS.CUSTOMER,
+                   AP.PROFILE_ID, 
+                   P.PERIOD_ID, P.PERIOD_FROM, P.PERIOD_TO 
+              FROM ACCOUNT_T A, ACCOUNT_PROFILE_T AP, 
+                   CONTRACT_T C, CONTRACTOR_T CT, CUSTOMER_T CS, 
+                   PERIOD_T P
+             WHERE A.BILLING_ID IN(2006,2007,2008)
+               AND A.STATUS       = 'B'
+               AND P.PERIOD_ID    = p_period_id
+               AND AP.ACCOUNT_ID  = A.ACCOUNT_ID
+               AND AP.DATE_FROM   < P.PERIOD_TO
+               AND (AP.DATE_TO IS NULL OR AP.DATE_TO > P.PERIOD_FROM)
+               AND AP.BRANCH_ID   = CT.CONTRACTOR_ID
+               AND AP.CONTRACT_ID = C.CONTRACT_ID
+               AND AP.CUSTOMER_ID = CS.CUSTOMER_ID
+               AND EXISTS (
+                 SELECT * FROM ORDER_T O
+                  WHERE O.ACCOUNT_ID = A.ACCOUNT_ID
+                    AND O.SERVICE_ID IN (
+                        7--, 128,142 --,125,140,127
+                    )
+               )
+        ),
+        EM AS (
+           SELECT 
+            CONTRACTOR_ID, EMAIL 
+           FROM account_documents_t
+              WHERE doc_detail = 'MEGOP_REPORT'
+              AND DELIVERY_METHOD_ID = 6501
+        )
+        SELECT 
+              CL.CONTRACTOR_ID, 
+              CONTRACTOR, 
+              COUNT(*) NUM, 
+              EM.EMAIL
+          FROM CL, EM
+         WHERE CL.CONTRACTOR_ID = EM.CONTRACTOR_ID(+)
+         GROUP BY CL.CONTRACTOR_ID, CONTRACTOR, EM.EMAIL
+         ORDER BY CL.CONTRACTOR
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 2. Список договоров операторов 
+--
+PROCEDURE Contract_List( 
+               p_recordset    OUT t_refc
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Contract_List';
+    v_retcode    INTEGER;
+    v_period_id  INTEGER;
+BEGIN
+    -- получаем ID актуального
+    SELECT PERIOD_ID 
+      INTO v_period_id
+      FROM (
+        SELECT PERIOD_ID 
+          FROM PERIOD_T P
+         WHERE P.POSITION IN ('OPEN','BILL')
+        ORDER BY DECODE('OPEN', 2,'BILL', 1,3)
+     )
+     WHERE ROWNUM = 1;
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+        WITH CL AS (
+            SELECT A.ACCOUNT_ID, C.CONTRACT_ID, C.CONTRACT_NO,
+                   CT.CONTRACTOR_ID, CT.CONTRACTOR, 
+                   CS.CUSTOMER_ID, CS.CUSTOMER,
+                   AP.PROFILE_ID, 
+                   P.PERIOD_ID, P.PERIOD_FROM, P.PERIOD_TO 
+              FROM ACCOUNT_T A, ACCOUNT_PROFILE_T AP, 
+                   CONTRACT_T C, CONTRACTOR_T CT, CUSTOMER_T CS, 
+                   PERIOD_T P
+             WHERE A.BILLING_ID IN(2006,2007,2008)
+               AND A.STATUS       = 'B'
+               AND P.PERIOD_ID    = v_period_id
+               AND AP.ACCOUNT_ID  = A.ACCOUNT_ID
+               AND AP.DATE_FROM   < P.PERIOD_TO
+               AND (AP.DATE_TO IS NULL OR AP.DATE_TO > P.PERIOD_FROM)
+               AND AP.BRANCH_ID   = CT.CONTRACTOR_ID
+               AND AP.CONTRACT_ID = C.CONTRACT_ID
+               AND AP.CUSTOMER_ID = CS.CUSTOMER_ID
+               AND EXISTS (
+                 SELECT * FROM ORDER_T O
+                  WHERE O.ACCOUNT_ID = A.ACCOUNT_ID
+                    AND O.SERVICE_ID IN (
+                        7--, 128,142 --,125,140,127
+                    )
+               )
+        )
+        SELECT CONTRACTOR_ID, CUSTOMER_ID, CUSTOMER, CONTRACT_NO 
+          FROM CL
+         GROUP BY CONTRACTOR_ID, CUSTOMER_ID, CUSTOMER, CONTRACT_NO
+         ORDER BY CONTRACTOR_ID, CUSTOMER_ID, CUSTOMER, CONTRACT_NO
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 3. Д О Х О Д
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Export_revenue( 
+               p_recordset      OUT t_refc,
+               p_contractor_id  IN VARCHAR2,
+               p_period_id      IN INTEGER               
+           )
+IS
+    v_prcName      CONSTANT VARCHAR2(30) := 'Export_revenue';
+    v_retcode      INTEGER;
+    v_period_from  DATE;
+    v_period_to    DATE;
+    v_network_id   INTEGER;
+BEGIN
+    -- настраиваем диапазоны
+    v_period_from  := Pk04_Period.Period_from(p_period_id);
+    v_period_to    := Pk04_Period.Period_to(p_period_id);
+    -- определяем id сети, он NETWORK_ID = BDR_OPER_T.BDR_TYPE_ID
+    -- по которому построены SUBPARTITION
+    SELECT N.NETWORK_ID
+      INTO v_network_id
+      FROM CONTRACTOR_T CT, NETWORK_T N
+     WHERE CT.CONTRACTOR_ID = p_contractor_id
+       AND CT.SELLER_ID = N.CONTRACTOR_ID
+       AND N.NETWORK_ID != 10;
+    
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+        -- --------------------------------------------------------------- --
+        WITH CL AS (
+            SELECT A.ACCOUNT_ID, A.ACCOUNT_NO, A.BILLING_ID, 
+                   C.CONTRACT_ID, C.CONTRACT_NO,
+                   CT.CONTRACTOR_ID, CT.CONTRACTOR, 
+                   CS.CUSTOMER_ID, CS.CUSTOMER,
+                   AP.PROFILE_ID 
+              FROM ACCOUNT_T A, ACCOUNT_PROFILE_T AP, 
+                   CONTRACT_T C, CONTRACTOR_T CT, CUSTOMER_T CS
+             WHERE A.BILLING_ID IN(2006,2007,2008)
+               AND A.STATUS       = 'B'
+               AND CT.CONTRACTOR_ID = p_contractor_id
+               AND AP.ACCOUNT_ID  = A.ACCOUNT_ID
+               AND AP.DATE_FROM   < v_period_to
+               AND (AP.DATE_TO IS NULL OR AP.DATE_TO > v_period_from)
+               AND AP.BRANCH_ID   = CT.CONTRACTOR_ID
+               AND AP.CONTRACT_ID = C.CONTRACT_ID
+               AND AP.CUSTOMER_ID = CS.CUSTOMER_ID
+               AND EXISTS (
+                 SELECT * FROM ORDER_T O
+                  WHERE O.ACCOUNT_ID = A.ACCOUNT_ID
+                    AND O.SERVICE_ID IN (
+                        7--, 128,142 --,125,140,127
+                    )
+               )
+        ), IT AS (
+            SELECT B.BILL_NO, B.BILL_TYPE, TO_DATE(B.BILL_DATE,'dd.mm.yyyy') BILL_DATE,
+                   B.ACCOUNT_ID, 
+                   O.ORDER_NO,
+                   --CASE 
+                   --   WHEN SUBSTR(CL.ACCOUNT_NO,1,8)||''-'' = SUBSTR(O.ORDER_NO,1,9) THEN SUBSTR(O.ORDER_NO,10)
+                   --   ELSE O.ORDER_NO 
+                   --END ORDER_NO,
+                   S.SERVICE, SS.SUBSERVICE, I.CHARGE_TYPE,
+                   I.ITEM_ID, SUM(I.ITEM_TOTAL) AMOUNT
+              FROM BILL_T B, ITEM_T I, ORDER_T O,  
+                   SERVICE_T S, SUBSERVICE_T SS, 
+                   CL
+             WHERE B.REP_PERIOD_ID = p_period_id --201511 -- p_period_id -- 201505
+               AND B.ACCOUNT_ID    = CL.ACCOUNT_ID
+               AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+               AND B.BILL_ID       = I.BILL_ID
+               AND O.ORDER_ID      = I.ORDER_ID
+               AND S.SERVICE_ID    = I.SERVICE_ID
+               AND SS.SUBSERVICE_ID= I.SUBSERVICE_ID
+            GROUP BY B.BILL_NO, B.BILL_TYPE, BILL_DATE,
+                     B.ACCOUNT_ID, 
+                     O.ORDER_NO,
+                     --CASE 
+                     -- WHEN SUBSTR(CL.ACCOUNT_NO,1,8)||''-'' = SUBSTR(O.ORDER_NO,1,9) THEN SUBSTR(O.ORDER_NO,10)
+                     -- ELSE O.ORDER_NO 
+                     --END, 
+                     S.SERVICE, SS.SUBSERVICE, I.CHARGE_TYPE,
+                     I.ITEM_ID
+        ), BDR AS (
+            SELECT --+ parallel(b 10)
+                  TRUNC(B.LOCAL_TIME,'mm') debt_month,
+                  B.ACCOUNT_ID, B.ITEM_ID, 
+                   (CASE B.TRF_TYPE WHEN 1 THEN 'Завершение'
+                                    WHEN 2 THEN 'Инициирование'
+                                    WHEN 5 THEN 'Инициирование на платформу'
+                    END) srv_name,
+                    COUNT(1) calls,
+                    ROUND(SUM(B.BILL_MINUTES),2) bill_minutes,
+                    ROUND(SUM(B.DURATION),2) cdr_seconds,
+                    ROUND(SUM(B.AMOUNT),2) amount,
+                    MIN(B.LOCAL_TIME) first_call,
+                    MAX(B.LOCAL_TIME) last_call
+              FROM BDR_OPER_T B, CL
+             WHERE B.REP_PERIOD BETWEEN v_period_from AND v_period_to
+               AND B.BDR_STATUS = 0
+               AND B.BDR_TYPE_ID = v_network_id
+               AND B.TRF_TYPE IN (1,2,5)
+               AND B.ACCOUNT_ID = CL.ACCOUNT_ID
+             GROUP BY TRUNC(B.LOCAL_TIME,'mm'), B.ACCOUNT_ID, B.ITEM_ID, B.TRF_TYPE
+        )
+        SELECT  '`'||CL.CONTRACT_NO CONTRACT_NO, 
+                CL.CUSTOMER, CL.ACCOUNT_NO, IT.ORDER_NO,
+                IT.BILL_NO, IT.BILL_TYPE, 
+                TO_CHAR(IT.BILL_DATE,'dd.mm.yyyy') BILL_DATE,
+                IT.SERVICE, IT.SUBSERVICE, 
+                IT.CHARGE_TYPE,
+                BDR.CALLS,
+                BDR.BILL_MINUTES,
+                BDR.CDR_SECONDS,
+                IT.AMOUNT,
+                TO_CHAR(BDR.FIRST_CALL,'dd.mm.yyyy hh24:mi:ss') FIRST_CALL,
+                TO_CHAR(BDR.LAST_CALL, 'dd.mm.yyyy hh24:mi:ss') LAST_CALL
+          FROM CL,IT,BDR
+         WHERE IT.ITEM_ID    = BDR.ITEM_ID(+)
+           AND CL.ACCOUNT_ID = IT.ACCOUNT_ID
+         ORDER BY CL.CONTRACT_NO
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- 4. Р А С Х О Д
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Export_debt( 
+               p_recordset      OUT t_refc,
+               p_contractor_id  IN VARCHAR2,
+               p_period_id      IN INTEGER               
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Export_debt';
+    v_retcode    INTEGER;
+    v_network_id INTEGER;
+    v_date_from  DATE;
+    v_date_to    DATE;
+BEGIN
+    -- настраиваем диапазоны
+    v_date_from  := Pk04_Period.Period_from(p_period_id);
+    v_date_to    := Pk04_Period.Period_to(p_period_id);
+    
+    -- определяем id сети, он NETWORK_ID = BDR_OPER_T.BDR_TYPE_ID
+    -- по которому построены SUBPARTITION
+    SELECT N.NETWORK_ID
+      INTO v_network_id
+      FROM CONTRACTOR_T CT, NETWORK_T N
+     WHERE CT.CONTRACTOR_ID = p_contractor_id
+       AND CT.SELLER_ID = N.CONTRACTOR_ID
+       AND N.NETWORK_ID != 10;
+       
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+        WITH bdr AS ( 
+            SELECT --+ parallel(b 10) 
+                  account_id, --bill_id, order_id, -- bill_id для расхода может не считаться, т.к. расход в счета не кладется 
+                  trf_type, service_id, subservice_id, parent_subsrv_id, 
+                   (CASE trf_type  WHEN 3 THEN 'Завершение' 
+                                   WHEN 4 THEN 'Инициирование' 
+                                   WHEN 6 THEN 'Инициирование на платформу' 
+                    END) srv_name, 
+                    COUNT(1) calls, 
+                    SUM(bill_minutes) bill_minutes, 
+                    SUM(duration) cdr_seconds, 
+                    SUM(amount) amount, 
+                    MIN(local_time) first_call, 
+                    MAX(local_time) last_call 
+              FROM bdr_oper_t b 
+             WHERE rep_period BETWEEN v_date_from AND v_date_to 
+               AND bdr_status = 0 
+               AND bdr_type_id = v_network_id
+               AND trf_type IN (3,4,6) 
+             GROUP BY account_id, --bill_id, order_id, 
+                      trf_type, service_id, subservice_id, parent_subsrv_id 
+        ) 
+        SELECT  DISTINCT 
+                '`'||c.CONTRACT_NO CONTRACT_NO, CS.CUSTOMER, S.SERVICE, 
+                NVL(SS.SRV_NAME, SR.SUBSERVICE) SUBSERVICE, 
+                bdr.calls, 
+                bdr.bill_minutes, 
+                bdr.cdr_seconds, 
+                bdr.amount, 
+                bdr.first_call, 
+                bdr.last_call 
+          FROM bdr, X07_SRV_DCT ss, SERVICE_T S, SUBSERVICE_T SR, --BILL_T B, 
+               ACCOUNT_PROFILE_T p, CONTRACT_T C, CUSTOMER_T CS  
+         WHERE BDR.SERVICE_ID  = S.SERVICE_ID 
+           AND BDR.SUBSERVICE_ID = ss.SRV_ID(+)
+           AND BDR.PARENT_SUBSRV_ID = SR.SUBSERVICE_ID 
+           AND BDR.ACCOUNT_ID = P.ACCOUNT_ID
+           AND P.CONTRACT_ID  = C.CONTRACT_ID
+           AND P.CUSTOMER_ID  = CS.CUSTOMER_ID
+           AND P.BRANCH_ID = p_contractor_id
+        ORDER BY CONTRACT_NO, CS.CUSTOMER, S.SERVICE
+        ;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+END PK26_OPERATOR_REPORT;
+/

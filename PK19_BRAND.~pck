@@ -1,0 +1,190 @@
+CREATE OR REPLACE PACKAGE PK19_BRAND
+IS
+    --
+    -- Пакет для работы с объектом "СОБЫТИЕ", таблицы:
+    -- event_t
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK19_BRAND';
+    -- ==============================================================================
+    c_RET_OK    constant integer := 0;
+    c_RET_ER		constant integer :=-1;
+    
+    type t_refc is ref cursor;
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создать новый бренд, возвращает значения
+    --   - положительное - ID лицевого счета клиента, 
+    --   - при ошибке выставляет исключение
+    FUNCTION New_brand(
+                   p_brand_name       IN VARCHAR2,
+                   p_parent_brand_id  IN INTEGER DEFAULT NULL
+               ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создать связь между брендами
+    --   - при ошибке выставляет исключение
+    PROCEDURE Link (
+               p_brand_id        IN INTEGER,
+               p_parent_brand_id IN INTEGER
+             );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- установить бренд для лицевого счета
+    --   - при ошибке выставляет исключение
+    PROCEDURE Set_account_brand (
+               p_account_id      IN INTEGER,
+               p_brand_id        IN INTEGER
+             );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- установить бренд для исполнителя по договору
+    --   - при ошибке выставляет исключение
+    PROCEDURE Set_contractor_brand (
+               p_contractor_id   IN INTEGER,
+               p_brand_id        IN INTEGER,
+               p_signer_id       IN INTEGER
+             );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- построить деорево брендов с заданной точки
+    --   - при ошибке выставляет исключение
+    PROCEDURE Brand_tree(p_recordset out t_refc, p_brand_id IN INTEGER DEFAULT NULL);
+    
+    
+END PK19_BRAND;
+/
+CREATE OR REPLACE PACKAGE BODY PK19_BRAND
+IS
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- создать новый бренд, возвращает значения
+--   - положительное - ID лицевого счета клиента, 
+--   - при ошибке выставляет исключение
+FUNCTION New_brand(
+               p_brand_name       IN VARCHAR2,
+               p_parent_brand_id  IN INTEGER DEFAULT NULL
+           ) RETURN INTEGER
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'New_brand';
+    v_brand_id  INTEGER;
+BEGIN
+    -- получаем ID из БД
+    SELECT MAX(BR.BRAND_ID)+1 INTO v_brand_id
+      FROM BRAND_T BR;
+    -- создаем запись бренда
+    INSERT INTO BRAND_T BR(BR.BRAND_ID, BR.BRAND, BR.PARENT_BRAND_ID)
+    VALUES(v_brand_id, p_brand_name, p_parent_brand_id);
+    --
+    RETURN v_brand_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- создать связь между брендами
+--   - при ошибке выставляет исключение
+PROCEDURE Link (
+           p_brand_id        IN INTEGER,
+           p_parent_brand_id IN INTEGER
+         )
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Link';
+    v_count     INTEGER;
+BEGIN
+    UPDATE BRAND_T
+       SET PARENT_BRAND_ID = p_parent_brand_id
+     WHERE BRAND_ID = p_brand_id;
+    v_count := SQL%ROWCOUNT;
+    IF v_count = 0 THEN
+        Pk01_Syslog.raise_Exception('Brand_id='||p_brand_id||' - not found', c_PkgName||'.'||v_prcName );
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- установить бренд для лицевого счета
+--   - при ошибке выставляет исключение
+PROCEDURE Set_account_brand (
+           p_account_id      IN INTEGER,
+           p_brand_id        IN INTEGER
+         )
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Set_account_brand';
+    v_count     INTEGER;
+BEGIN
+    UPDATE ACCOUNT_T
+       SET BRAND_ID   = p_brand_id
+     WHERE ACCOUNT_ID = p_account_id;
+    v_count := SQL%ROWCOUNT;
+    IF v_count = 0 THEN
+        Pk01_Syslog.raise_Exception('Brand_id='||p_brand_id||' - not found', c_PkgName||'.'||v_prcName );
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- установить бренд для исполнителя по договору
+--   - при ошибке выставляет исключение
+PROCEDURE Set_contractor_brand (
+           p_contractor_id   IN INTEGER,
+           p_brand_id        IN INTEGER,
+           p_signer_id       IN INTEGER
+         )
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Set_contractor_brand';
+BEGIN
+    MERGE INTO CONTRACTOR_BRAND_T CB
+       USING (
+         SELECT p_contractor_id CONTRACTOR_ID, p_brand_id BRAND_ID, p_signer_id SIGNER_ID
+           FROM DUAL
+       ) D
+       ON (CB.CONTRACTOR_ID=D.CONTRACTOR_ID AND CB.BRAND_ID=D.BRAND_ID)
+       WHEN MATCHED THEN UPDATE SET CB.SIGNER_ID = p_signer_id
+       WHEN NOT MATCHED THEN INSERT (CB.CONTRACTOR_ID, CB.BRAND_ID, CB.SIGNER_ID)
+         VALUES (D.CONTRACTOR_ID, D.BRAND_ID, D.SIGNER_ID);
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- построить деорево брендов с заданной точки
+--   - при ошибке выставляет исключение
+PROCEDURE Brand_tree(p_recordset out t_refc, p_brand_id IN INTEGER DEFAULT NULL)
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Brand_tree';
+    v_retcode    INTEGER;
+BEGIN
+    -- открываем курсор
+    IF p_brand_id IS NULL THEN
+        OPEN p_recordset FOR
+            SELECT LEVEL, PARENT_BRAND_ID, BRAND_ID, BRAND FROM BRAND_T
+            CONNECT BY PRIOR BRAND_ID = PARENT_BRAND_ID
+              START WITH PARENT_BRAND_ID IS NULL;
+    ELSE
+        OPEN p_recordset FOR
+            SELECT LEVEL, PARENT_BRAND_ID, BRAND_ID, BRAND FROM BRAND_T
+            CONNECT BY PRIOR BRAND_ID = PARENT_BRAND_ID
+              START WITH PARENT_BRAND_ID = p_brand_id;
+    END IF;
+    --
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+
+
+
+END PK19_BRAND;
+/

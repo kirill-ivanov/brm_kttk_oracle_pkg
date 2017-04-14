@@ -1,0 +1,1344 @@
+CREATE OR REPLACE PACKAGE PK07_BILL
+IS
+    --
+    -- Пакет для работы с объектом "СЧЕТ", таблицы:
+    -- bill_t
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK07_BILL';
+    -- ==============================================================================
+    type t_refc is ref cursor;
+   
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --    
+    -- создание нового разового счета, возвращает:
+    --   - положительное - ID текущего счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Open_manual_bill (
+                   p_account_id    IN INTEGER,   -- ID лицевого счета
+                   p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+                   p_bill_no       IN VARCHAR2,  -- Номер счета
+                   p_currency_id   IN INTEGER,   -- ID валюты счета
+                   p_bill_date     IN DATE,      -- Дата счета (биллингового периода)
+                   p_notes         IN VARCHAR2   -- примечания к счету
+               ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создание нового периодического счета, возвращает:
+    --   - положительное - ID текущего счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Open_recuring_bill (
+                   p_account_id    IN INTEGER,   -- ID лицевого счета
+                   p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+                   p_bill_no       IN VARCHAR2,  -- Номер счета
+                   p_currency_id   IN INTEGER,   -- ID валюты счета
+                   p_bill_date     IN DATE       -- Дата счета (биллингового периода)
+                ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создание следующего по порядку периодического счета, возвращает:
+    --   - положительное - ID текущего счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Next_recuring_bill (
+                   p_account_id    IN INTEGER,   -- ID лицевого счета
+                   p_rep_period_id IN INTEGER    -- ID расчетного периода YYYYMM
+               ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- счет создается в случае если по какой-то причине счет за 
+    -- прошедший период не был выставлен, а клиент не хочет 
+    -- чтобы потерянные начисления вошли в отдельный счет,
+    -- а не попали отдельными позициями в текущий счет
+    -- возвращает:
+    --   - положительное - ID счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Open_rec_bill_for_old_period (
+                   p_account_id    IN INTEGER,   -- ID лицевого счета
+                   p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+                   p_bill_no       IN VARCHAR2,  -- Номер счета
+                   p_currency_id   IN INTEGER,   -- ID валюты счета
+                   p_bill_date     IN DATE       -- Дата счета (биллингового периода)
+                ) RETURN INTEGER;
+
+/*
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создание новой кредит-ноты, возвращает:
+    --   - положительное - ID текущего счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Open_credit_note (
+                   p_src_bill_id   IN INTEGER,   -- ID счета для которого создается Кредит-нота
+                   p_src_period_id IN INTEGER,   -- ID расчетного периода YYYYMM источника
+                   p_crd_period_id IN INTEGER,   -- ID расчетного периода кредит-ноты YYYYMM
+                   p_bill_date     IN DATE,      -- Дата кредит-ноты (биллингового периода)
+                   p_notes         IN VARCHAR2   -- Примечание
+               ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создание новой дебет-ноты, возвращает:
+    --   - положительное - ID текущего счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Open_debit_note (
+                   p_crd_bill_id   IN INTEGER,   -- ID кредит-ноты для которой создается Дебет-нота (ID кредит-ноты)
+                   p_crd_period_id IN INTEGER,   -- ID расчетного периода YYYYMM кредит-ноты  
+                   p_dbt_period_id IN INTEGER,   -- ID расчетного периода дебет-ноты YYYYMM
+                   p_bill_date      IN DATE,     -- Дата кредит-ноты (биллингового периода)
+                   p_notes          IN VARCHAR2  -- Примечание
+               ) RETURN INTEGER;
+
+    -- Формирование счета для кредит-дебет ноты
+    FUNCTION Get_billno_for_credit_debit (
+             p_src_bill_id       IN INTEGER,   -- ID кредит-ноты для которой создается Дебет-нота (ID кредит-ноты)
+             p_src_period_id     IN INTEGER   -- ID расчетного периода YYYYMM кредит-ноты 
+    ) RETURN VARCHAR2;
+
+    --
+    -- Добавить корректировку на счет (использовать только в составе операции - "Корректировка счета") 
+    -- Возвращает баланс счета
+    --   - при ошибке выставляем исключение
+    FUNCTION Put_adjustment (
+                   p_bill_id       IN INTEGER,   -- ID счета 
+                   p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+                   p_value         IN NUMBER     -- величина корректировки
+               )  RETURN NUMBER;
+*/
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- установить статус счета
+    -- при ошибке выставляем исключение 
+    PROCEDURE Set_status (
+                   p_bill_id       IN INTEGER,   -- ID счета 
+                   p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+                   p_bill_status   IN VARCHAR2   -- статус счета
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получить статус счета, возвращает
+    -- - статус счета
+    -- - при ошибке выставляем исключение 
+    FUNCTION Get_status (
+                   p_bill_id       IN INTEGER,
+                   p_rep_period_id IN INTEGER    -- ID расчетного периода YYYYMM
+               ) RETURN VARCHAR2;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- закрыть счет 
+    -- при ошибке выставляем исключение
+    PROCEDURE Close_bill( p_bill_id IN INTEGER, p_rep_period_id IN INTEGER );
+
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Проверка правильности установки префикса региона
+    -- возвращает корректный номер счета
+    FUNCTION Check_region_prefix ( 
+                 p_bill_id   IN INTEGER,
+                 p_period_id IN INTEGER 
+             ) RETURN VARCHAR2;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Получить следующий номер периодического счета в BRM
+    -- номера счетов формируются по единому правилу: YYMM(№ Л/С)[A-Z]
+    FUNCTION Next_bill_no(
+                   p_account_id     IN INTEGER,
+                   p_bill_period_id IN INTEGER
+               ) RETURN VARCHAR2;
+           
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- УСТАРЕВШАЯ ВЕРСИЯ ДО 31.12.2014
+    -- Получить следующий номер периодического счета,
+    -- следует учитывать, что в биллинге "Микротест" и "старом биллинге" 
+    -- номера счетов формируются по разным правилам:
+    -- "Микротест" - CONTRACT_NO_XXXX, где XXXX - порядковый номер счета
+    --               следует учитывать, что на одном договоре, может быть
+    --               несколько лицевых счетов
+    -- "старом биллинге" - YYMM(№ Л/С)[A-Z]
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Next_bill_no(
+                   p_account_id     IN INTEGER,
+                   p_contract_id    IN INTEGER,
+                   p_bill_period_id IN INTEGER  
+               ) RETURN VARCHAR2;
+
+    -- служебная процедура восстановления данных в таблице CONTRACT_BILL_SQ_T
+    PROCEDURE Fill_contract_bill_sq_t;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- создание описателя счетов для нового Л/С
+    --   - при ошибке выставляет исключение
+    PROCEDURE New_billinfo (
+                   p_account_id       IN INTEGER,   -- ID лицевого счета
+                   p_currency_id      IN INTEGER,   -- ID валюты счета
+                   p_delivery_id      IN INTEGER,   -- ID способа доставки счета
+                   p_days_for_payment IN INTEGER DEFAULT 30   -- кол-во дней на оплату счета
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- сформировать счет: получить сумму начислений и корректировок счета по позициям
+    -- и проставить признак, что счет сформирован , 
+    -- т.е. начисления на его позиции не возможны, 
+    -- принимаются только оплаты
+    -- возвращает:
+    -- - возвращаем сумму начислений и корректировок по счету (то что должно быть оплачено)
+    -- - при ошибке выставляет исключение
+    FUNCTION Generate_bill (
+                   p_bill_id       IN INTEGER,   -- ID позиции счета
+                   p_rep_period_id IN INTEGER    -- ID периода счета
+               ) RETURN NUMBER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Рассформировать счет (только для статуса READY): 
+    -- обнулить сумму начислений и корректировок счета по позициям
+    -- удалить строки счета фактуры, если были сформированы
+    -- и вернуть признак OPEN,
+    -- т.е. сделать возможными начисления на его позиции 
+    -- возвращает:
+    --   - положительное - ID счета, 
+    --   - при ошибке выставляет исключение
+    FUNCTION Rollback_bill (
+                   p_bill_id       IN INTEGER,   -- ID позиции счета
+                   p_rep_period_id IN INTEGER    -- ID периода счета
+               ) RETURN NUMBER;
+
+    /**
+    Откат счета. Технологическая функция. Нужно пото убить
+    **/
+    FUNCTION Rollback_bill_force (
+                   p_bill_id       IN INTEGER,   -- ID позиции счета
+                   p_rep_period_id IN INTEGER    -- ID периода счета
+               ) RETURN NUMBER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Перенос счета в другой период
+    -- счет должен быть в состоянии 'OPEN', 
+    -- иначе перед переносом его следует расформировать
+    -- Возвращает bill_id - перенесенного счета
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -- 
+    FUNCTION Move_bill (
+                  p_bill_id      IN INTEGER,
+                  p_period_id    IN INTEGER,
+                  p_period_id_to IN INTEGER,
+                  p_bill_date_to IN DATE
+              ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Рассчитать задолженность по счету
+    -- возвращает:
+    -- - возвращаем сумму задолженности по счету
+    -- - при ошибке выставляет исключение
+    FUNCTION Calculate_due(
+                   p_bill_id       IN INTEGER,   -- ID позиции счета
+                   p_rep_period_id IN INTEGER    -- ID периода счета
+               ) RETURN NUMBER;
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- найти все позиции указанного счета
+    --   - положительное - кол-во выбранных записей
+    --   - при ошибке выставляет исключение
+    FUNCTION Items_list( 
+                   p_recordset OUT t_refc, 
+                   p_bill_id       IN INTEGER,   -- ID позиции счета
+                   p_rep_period_id IN INTEGER    -- ID периода счета
+               ) RETURN INTEGER;
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Удалить все позиции указанного счета (скорее всего только сразу после ошибочного создания)
+    --   - положительное - кол-во удаленных записей
+    --   - при ошибке выставляет исключение
+    FUNCTION Delete_items (
+                   p_bill_id       IN INTEGER,   -- ID позиции счета
+                   p_rep_period_id IN INTEGER    -- ID периода счета
+               ) RETURN INTEGER;
+  
+    -- =============================================================== --
+    -- Служебные функции
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Прочитать данные из профиля л/с
+    --
+    PROCEDURE Read_account_profile (
+                   p_account_id    IN INTEGER,   -- ID лицевого счета
+                   p_bill_date     IN DATE,      -- дата счета
+                   p_profile_id    OUT INTEGER,  -- ID профиля л/с
+                   p_contract_id   OUT INTEGER,  -- ID договора
+                   p_contractor_id OUT INTEGER,  -- ID продавца
+                   p_bank_id       OUT INTEGER,  -- ID банка продавца
+                   p_vat           OUT INTEGER   -- ставка НДС
+               );
+
+END PK07_BILL;
+/
+CREATE OR REPLACE PACKAGE BODY PK07_BILL
+IS
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Прочитать данные из профиля л/с
+--
+PROCEDURE Read_account_profile (
+               p_account_id    IN INTEGER,   -- ID лицевого счета
+               p_bill_date     IN DATE,      -- дата счета
+               p_profile_id    OUT INTEGER,  -- ID профиля л/с
+               p_contract_id   OUT INTEGER,  -- ID договора
+               p_contractor_id OUT INTEGER,  -- ID продавца
+               p_bank_id       OUT INTEGER,  -- ID банка продавца
+               p_vat           OUT INTEGER   -- ставка НДС
+           )
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Read_account_profile';
+BEGIN
+    SELECT AP.PROFILE_ID, AP.CONTRACT_ID,
+           AP.CONTRACTOR_ID, AP.CONTRACTOR_BANK_ID, AP.VAT
+      INTO p_profile_id, p_contract_id,
+           p_contractor_id, p_bank_id, p_vat
+      FROM ACCOUNT_PROFILE_T AP
+     WHERE AP.ACCOUNT_ID = p_account_id
+       AND AP.DATE_FROM <= p_bill_date
+       AND (AP.DATE_TO IS NULL OR p_bill_date <= AP.DATE_TO)
+       AND ROWNUM = 1; -- для страховки
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --    
+-- создание нового разового счета, возвращает:
+--   - положительное - ID текущего счета, 
+--   - при ошибке выставляет исключение
+FUNCTION Open_manual_bill (
+               p_account_id    IN INTEGER,   -- ID лицевого счета
+               p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+               p_bill_no       IN VARCHAR2,  -- Номер счета
+               p_currency_id   IN INTEGER,   -- ID валюты счета
+               p_bill_date     IN DATE,      -- Дата счета (биллингового периода)
+               p_notes         IN VARCHAR2   -- примечания к счету
+           ) RETURN INTEGER
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Open_manual_bill';
+    v_bill_id       INTEGER; 
+    v_profile_id    INTEGER;
+    v_contract_id   INTEGER;
+    v_contractor_id INTEGER;
+    v_bank_id       INTEGER;
+    
+    v_vat         NUMBER;
+BEGIN
+    -- Формируем ID объекта (POID) для указанного биллингового периода 
+    v_bill_id := Pk02_POID.Next_bill_id;
+    
+    -- получаем id договора и ставку НДС
+    Read_account_profile (
+               p_account_id    => p_account_id,
+               p_bill_date     => p_bill_date,
+               p_profile_id    => v_profile_id,
+               p_contract_id   => v_contract_id,
+               p_contractor_id => v_contractor_id,
+               p_bank_id       => v_bank_id,
+               p_vat           => v_vat
+           );
+    
+    -- Cоздаем разовый счет для последующего заполнения
+    INSERT INTO BILL_T (
+        CONTRACT_ID,     -- ID договора
+        ACCOUNT_ID,      -- ID лицевого счета
+        BILL_ID,         -- ID лицевого счета
+        REP_PERIOD_ID,   -- ID расчетного периода
+        BILL_TYPE,       -- Тип счета
+        BILL_NO,         -- Номер счета
+        CURRENCY_ID,     -- ID валюты счета
+        BILL_DATE,       -- Дата счета (биллингового периода)
+        BILL_STATUS,     -- Состояние счета - ОТКРЫТ
+        VAT,             -- ставка НДС 
+        PROFILE_ID,      -- ID профиля л/с
+        CONTRACTOR_ID,   -- ID продавца
+        CONTRACTOR_BANK_ID, -- ID банка продавца
+        NOTES
+    )VALUES(
+        v_contract_id,
+        p_account_id,
+        v_bill_id,
+        p_rep_period_id,
+        PK00_CONST.c_BILL_TYPE_ONT,
+        p_bill_no,
+        p_currency_id,
+        p_bill_date,
+        PK00_CONST.c_BILL_STATE_OPEN,
+        v_vat,
+        v_profile_id,
+        v_contractor_id,
+        v_bank_id,
+        p_notes
+    );  
+    RETURN v_bill_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- создание нового периодического счета, возвращает:
+--   - положительное - ID текущего счета, 
+--   - при ошибке выставляет исключение
+FUNCTION Open_recuring_bill (
+               p_account_id    IN INTEGER,   -- ID лицевого счета
+               p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+               p_bill_no       IN VARCHAR2,  -- Номер счета
+               p_currency_id   IN INTEGER,   -- ID валюты счета
+               p_bill_date     IN DATE       -- Дата счета (биллингового периода)
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Open_recuring_bill';
+    v_bill_id       INTEGER;
+    v_profile_id    INTEGER;
+    v_contract_id   INTEGER;
+    v_contractor_id INTEGER;
+    v_bank_id       INTEGER;   
+    v_vat           NUMBER;
+BEGIN
+    -- Формируем ID объекта (POID) для указанного биллингового периода 
+    v_bill_id := Pk02_POID.Next_bill_id;
+    
+    -- получаем id договора и ставку НДС
+    Read_account_profile (
+               p_account_id    => p_account_id,
+               p_bill_date     => p_bill_date,
+               p_profile_id    => v_profile_id,
+               p_contract_id   => v_contract_id,
+               p_contractor_id => v_contractor_id,
+               p_bank_id       => v_bank_id,
+               p_vat           => v_vat
+           );
+    
+    -- Cоздаем периодический счет для последующего заполнения
+    INSERT INTO BILL_T (
+        CONTRACT_ID,     -- ID договора
+        ACCOUNT_ID,      -- ID лицевого счета
+        BILL_ID,         -- ID лицевого счета
+        REP_PERIOD_ID,   -- ID расчетного периода YYYYMM
+        BILL_TYPE,       -- Тип счета
+        BILL_NO,         -- Номер счета
+        CURRENCY_ID,     -- ID валюты счета
+        BILL_DATE,       -- Дата счета (биллингового периода)
+        BILL_STATUS,     -- состояние счета
+        PROFILE_ID,      -- ID профиля л/с
+        CONTRACTOR_ID,    -- ID продавца
+        CONTRACTOR_BANK_ID, -- ID банка продавца
+        VAT              -- ставка НДС
+    )VALUES(
+        v_contract_id,
+        p_account_id,
+        v_bill_id,
+        p_rep_period_id,
+        PK00_CONST.c_BILL_TYPE_REC,
+        p_bill_no,
+        p_currency_id,
+        p_bill_date,
+        PK00_CONST.c_BILL_STATE_OPEN,
+        v_profile_id,
+        v_contractor_id,
+        v_bank_id,
+        v_vat
+    );  
+    RETURN v_bill_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- создание следующего по порядку периодического счета
+
+-- Получить следующий номер периодического счета,
+-- следует учитывать, что в биллинге "Микротест" и "старом биллинге" 
+-- номера счетов формируются по разным правилам:
+-- "Микротест" - CONTRACT_NO_XXXX, где XXXX - порядковый номер счета
+--               следует учитывать, что на одном договоре, может быть
+--               несколько лицевых счетов
+-- "старом биллинге" - YYMM(№ Л/С)[A-Z]
+-- Возвращает:
+--   - положительное - ID текущего счета, 
+--   - при ошибке выставляет исключение
+
+FUNCTION Next_recuring_bill (
+               p_account_id    IN INTEGER,   -- ID лицевого счета
+               p_rep_period_id IN INTEGER    -- ID расчетного периода YYYYMM
+           ) RETURN INTEGER
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Next_recuring_bill';
+    v_bill_id       INTEGER;
+    v_bill_date     DATE;
+    v_currency_id   INTEGER;
+    v_bill_no       BILL_T.BILL_NO%TYPE := NULL;
+    v_profile_id    INTEGER;
+    v_contract_id   INTEGER;
+    v_contractor_id INTEGER;
+    v_bank_id       INTEGER;
+    v_vat           NUMBER;
+BEGIN
+    -- определяем дату счета
+    v_bill_date := PK04_PERIOD.Period_to(p_rep_period_id);
+
+    -- получаем id договора и ставку НДС
+    Read_account_profile (
+               p_account_id    => p_account_id,
+               p_bill_date     => v_bill_date,
+               p_profile_id    => v_profile_id,
+               p_contract_id   => v_contract_id,
+               p_contractor_id => v_contractor_id,
+               p_bank_id       => v_bank_id,
+               p_vat           => v_vat
+           );
+
+    -- вычисляем номер очередного счета
+    --v_bill_no := Next_bill_no( p_account_id, v_contract_id, p_rep_period_id);
+    v_bill_no := Next_bill_no( p_account_id, p_rep_period_id);
+
+    -- получаем валюту счета
+    SELECT A.CURRENCY_ID 
+      INTO v_currency_id 
+      FROM ACCOUNT_T A
+     WHERE A.ACCOUNT_ID = p_account_id;
+    
+    -- Формируем ID объекта (POID) для указанного биллингового периода 
+    v_bill_id := Pk02_POID.Next_bill_id;
+    
+    -- Cоздаем периодический счет для последующего заполнения
+    INSERT INTO BILL_T (
+        CONTRACT_ID,     -- ID договора
+        ACCOUNT_ID,      -- ID лицевого счета
+        BILL_ID,         -- ID лицевого счета
+        REP_PERIOD_ID,   -- ID расчетного периода YYYYMM
+        BILL_TYPE,       -- Тип счета
+        BILL_NO,         -- Номер счета
+        CURRENCY_ID,     -- ID валюты счета
+        BILL_DATE,       -- Дата счета (биллингового периода)
+        BILL_STATUS,     -- состояние счета
+        PROFILE_ID,      -- ID профиля л/с
+        CONTRACTOR_ID,   -- ID продавца
+        CONTRACTOR_BANK_ID, -- ID банка продавца
+        VAT              -- ставка НДС
+    )VALUES(
+        v_contract_id,
+        p_account_id,
+        v_bill_id,
+        p_rep_period_id,
+        PK00_CONST.c_BILL_TYPE_REC,
+        v_bill_no,
+        v_currency_id,
+        v_bill_date,
+        PK00_CONST.c_BILL_STATE_OPEN,
+        v_profile_id,
+        v_contractor_id,
+        v_bank_id,
+        v_vat
+    );  
+
+    -- изменяем описатель счета (возможно необходимость в этом отпадет)
+    UPDATE BILLINFO_T BI
+       SET BI.LAST_PERIOD_ID = p_rep_period_id,
+           BI.LAST_BILL_ID = v_bill_id
+     WHERE BI.ACCOUNT_ID = p_account_id;
+
+    -- возвращаем номер счета
+    RETURN v_bill_id;
+    --     
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR. Account_Id: ' || TO_CHAR(p_Account_Id) || ', new bill_no: ' || v_bill_no, c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- счет создается в случае если по какой-то причине счет за 
+-- прошедший период не был выставлен, а клиент хочет 
+-- чтобы потерянные начисления вошли в отдельный счет,
+-- а не попали отдельными позициями в текущий счет
+-- возвращает:
+--   - положительное - ID счета, 
+--   - при ошибке выставляет исключение
+FUNCTION Open_rec_bill_for_old_period (
+               p_account_id    IN INTEGER,   -- ID лицевого счета
+               p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+               p_bill_no       IN VARCHAR2,  -- Номер счета
+               p_currency_id   IN INTEGER,   -- ID валюты счета
+               p_bill_date     IN DATE       -- Дата счета (биллингового периода)
+            ) RETURN INTEGER
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Open_recuring_bill';
+    v_bill_id       INTEGER;                   -- формат POID: YYMM.XXX.XXX.XXX,
+    v_profile_id    INTEGER;
+    v_contract_id   INTEGER;
+    v_contractor_id INTEGER;
+    v_bank_id       INTEGER;
+    v_vat           NUMBER;
+BEGIN
+    -- Формируем ID объекта (POID) для указанного биллингового периода 
+    v_bill_id := Pk02_POID.Next_bill_id;
+    
+    -- получаем id договора и ставку НДС
+    Read_account_profile (
+               p_account_id    => p_account_id,
+               p_bill_date     => p_bill_date,
+               p_profile_id    => v_profile_id,
+               p_contract_id   => v_contract_id,
+               p_contractor_id => v_contractor_id,
+               p_bank_id       => v_bank_id,
+               p_vat           => v_vat
+           );
+    
+    -- Cоздаем периодический счет для последующего заполнения
+    INSERT INTO BILL_T (
+        ACCOUNT_ID,      -- ID лицевого счета
+        BILL_ID,         -- ID лицевого счета
+        REP_PERIOD_ID,   -- ID расчетного периода YYYYMM
+        BILL_TYPE,       -- Тип счета
+        BILL_NO,         -- Номер счета
+        CURRENCY_ID,     -- ID валюты счета
+        BILL_DATE,       -- Дата счета (биллингового периода)
+        BILL_STATUS,     -- состояние счета
+        PROFILE_ID,      -- ID профиля л/с
+        CONTRACT_ID,     -- ID договора
+        CONTRACTOR_ID,   -- ID продавца
+        CONTRACTOR_BANK_ID, -- ID банка продавца
+        VAT
+    )VALUES(
+        p_account_id,
+        v_bill_id,
+        p_rep_period_id,
+        PK00_CONST.c_BILL_TYPE_OLD,
+        p_bill_no,
+        p_currency_id,
+        p_bill_date,
+        PK00_CONST.c_BILL_STATE_OPEN,
+        v_profile_id,
+        v_contract_id,
+        v_contractor_id,
+        v_bank_id,
+        v_vat
+    );  
+    RETURN v_bill_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- установить статус счета
+-- при ошибке выставляем исключение 
+PROCEDURE Set_status (
+               p_bill_id       IN INTEGER,   -- ID счета 
+               p_rep_period_id IN INTEGER,   -- ID расчетного периода YYYYMM
+               p_bill_status   IN VARCHAR2   -- статус счета
+           ) 
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Set_status';
+BEGIN
+    UPDATE BILL_T SET BILL_STATUS = p_bill_status 
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- получить статус счета, возвращает
+-- - статус счета
+-- - при ошибке выставляем исключение 
+FUNCTION Get_status (
+               p_bill_id       IN INTEGER,
+               p_rep_period_id IN INTEGER    -- ID расчетного периода YYYYMM
+           ) RETURN VARCHAR2
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Get_status';
+    v_bill_status BILL_T.BILL_STATUS%TYPE;
+BEGIN
+    SELECT BILL_STATUS INTO v_bill_status
+      FROM BILL_T
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    RETURN v_bill_status;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- закрыть счет 
+-- при ошибке выставляем исключение
+PROCEDURE Close_bill( p_bill_id IN INTEGER, p_rep_period_id IN INTEGER )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Close_bill';
+BEGIN
+    Set_status ( p_bill_id, p_rep_period_id, PK00_CONST.c_BILL_STATE_CLOSED );
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Проверка правильности установки префикса региона
+FUNCTION Check_region_prefix ( 
+             p_bill_id   IN INTEGER,
+             p_period_id IN INTEGER 
+         ) RETURN VARCHAR2
+IS
+    v_prcName      CONSTANT VARCHAR2(30) := 'Check_region_prefix';
+    v_bill_no      BILL_T.BILL_NO%TYPE;
+BEGIN
+    -- получаем код региона и номер счета
+    SELECT 
+      CASE
+        WHEN SUBSTR(B.BILL_NO,5,1) = '/' AND CR.REGION_ID != SUBSTR(B.BILL_NO,1,4) THEN
+          -- некорректно указан регион
+          LPAD(TO_CHAR(CR.REGION_ID), 4,'0')||'/'||SUBSTR(B.BILL_NO,6)
+        WHEN SUBSTR(B.BILL_NO,5,1) = '/' AND CR.REGION_ID IS NULL THEN
+          -- регион указан, а его быть не должно
+          SUBSTR(B.BILL_NO,6)
+        WHEN SUBSTR(B.BILL_NO,5,1) != '/' AND CR.REGION_ID IS NOT NULL THEN
+          -- не указан регион, а должен быть
+          LPAD(TO_CHAR(CR.REGION_ID), 4,'0')||'/'||SUBSTR(B.BILL_NO,6)
+        ELSE
+          -- все в порядке
+          B.BILL_NO
+       END BILL_NO
+      INTO v_bill_no
+      FROM CONTRACTOR_T CR, BILL_T B
+     WHERE B.REP_PERIOD_ID  = p_period_id
+       AND B.BILL_ID        = p_bill_id
+       AND B.CONTRACTOR_ID  = CR.CONTRACTOR_ID
+    ;
+    RETURN v_bill_no;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Получить следующий номер периодического счета в BRM
+-- номера счетов формируются по единому правилу: YYMM(№ Л/С)[A-Z]
+FUNCTION Next_bill_no(
+               p_account_id     IN INTEGER,
+               p_bill_period_id IN INTEGER
+           ) RETURN VARCHAR2
+IS
+    v_prcName      CONSTANT VARCHAR2(30) := 'Next_bill_no';
+    v_billing_id   INTEGER;
+    v_region_id    INTEGER;
+    v_date_from    DATE;
+    v_date_to      DATE;
+    v_bill_no      BILL_T.BILL_NO%TYPE := NULL;
+    v_account_no   ACCOUNT_T.ACCOUNT_NO%TYPE;
+    v_count        INTEGER;
+    v_next         INTEGER;
+BEGIN
+    v_date_from := Pk04_Period.Period_from(p_bill_period_id);
+    v_date_to   := Pk04_Period.Period_to(p_bill_period_id);
+    -- получаем допольнительную информацию
+    SELECT A.ACCOUNT_NO, A.BILLING_ID, CR.REGION_ID
+      INTO v_account_no, v_billing_id, v_region_id
+      FROM ACCOUNT_T A, ACCOUNT_PROFILE_T AP, CONTRACTOR_T CR
+     WHERE A.ACCOUNT_ID = p_account_id
+       AND A.ACCOUNT_ID = AP.ACCOUNT_ID
+       AND AP.DATE_FROM <= v_date_to
+       AND (AP.DATE_TO IS NULL OR v_date_from <= AP.DATE_TO)
+       AND AP.CONTRACTOR_ID = CR.CONTRACTOR_ID
+       AND ROWNUM = 1;      -- страхуемся от задвоений, хотя их быть не должно
+
+
+    -- формируем номер счета
+    v_bill_no := SUBSTR(TO_CHAR(p_bill_period_id),3,4)||v_account_no;
+    -- проверяем на уникальность
+    v_next := 0;    
+    LOOP
+        -- проверяем существует ли номер
+        SELECT COUNT(*) INTO v_count
+          FROM BILL_T B
+         WHERE B.BILL_NO = v_bill_no;  
+        EXIT WHEN v_count = 0;  -- все нормально, выходим из цикла
+        --
+        -- формируем следующий по порядку счет    
+        -- в BRM принята единая схема нумерации счетов: YYMM(№ Л/С)[C,D,E-Z]
+        -- С, D - зарезеовированы для кредит/дебит нот
+        v_bill_no := SUBSTR(TO_CHAR(p_bill_period_id),3,4)
+                         ||v_account_no||CHR(ASCII('D')+v_next);
+        --
+        v_next := v_next + 1;
+    END LOOP;
+    
+    -- с переходом на филиальную структуру, добавляем номер региона
+    IF v_region_id IS NOT NULL THEN
+        v_bill_no := v_region_id||'/'||v_bill_no;
+    END IF;
+    
+    RETURN v_bill_no;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR(account_id=' ||p_account_id||
+                                        ', period_id='  ||p_bill_period_id||')'
+                                    , c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- УСТАРЕВШАЯ ВЕРСИЯ ДО 31.12.2014
+-- Получить следующий номер периодического счета
+-- следует учитывать, что в биллинге "Микротест" и "старом биллинге" 
+-- номера счетов формируются по разным правилам:
+-- "Микротест" - CONTRACT_NO_XXXX, где XXXX - порядковый номер счета
+--               следует учитывать, что на одном договоре, может быть
+--               несколько лицевых счетов
+-- "старом биллинге" - YYMM(№ Л/С)[A-Z]
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Next_bill_no(
+               p_account_id     IN INTEGER,
+               p_contract_id    IN INTEGER,
+               p_bill_period_id IN INTEGER
+           ) RETURN VARCHAR2
+IS
+    v_prcName      CONSTANT VARCHAR2(30) := 'Next_bill_no';
+    v_billing_id   INTEGER;
+    v_sq_bill_no   INTEGER;
+    v_region_id    INTEGER;
+    v_date_from    DATE;
+    v_date_to      DATE;
+    v_bill_no      BILL_T.BILL_NO%TYPE := NULL;
+    v_account_no   ACCOUNT_T.ACCOUNT_NO%TYPE;
+    v_contract_no  CONTRACT_T.CONTRACT_NO%TYPE;
+    v_count        INTEGER;
+BEGIN
+  
+    v_date_from := Pk04_Period.Period_from(p_bill_period_id);
+    v_date_to   := Pk04_Period.Period_to(p_bill_period_id);
+    -- получаем допольнительную информацию
+    SELECT A.ACCOUNT_NO, A.BILLING_ID, LPAD(TO_CHAR(CR.REGION_ID), 4,'0') 
+      INTO v_account_no, v_billing_id, v_region_id
+      FROM ACCOUNT_T A, ACCOUNT_PROFILE_T AP, CONTRACTOR_T CR
+     WHERE A.ACCOUNT_ID = p_account_id
+       AND A.ACCOUNT_ID = AP.ACCOUNT_ID
+       AND AP.DATE_FROM <= v_date_to
+       AND (AP.DATE_TO IS NULL OR v_date_from <= AP.DATE_TO)
+       AND AP.CONTRACTOR_ID = CR.CONTRACTOR_ID
+       AND ROWNUM = 1;      -- страхуемся от задвоений, хотя их быть не должно
+
+    LOOP
+        -- в зависимости от типа биллинга, правила формирования номера счета разные
+        IF v_billing_id = Pk00_Const.c_BILLING_MMTS THEN 
+            SELECT C.CONTRACT_NO, BS.BILL_SQ --NVL(BS.BILL_SQ,0)+1
+              INTO v_contract_no, v_sq_bill_no
+              FROM CONTRACT_T C, CONTRACT_BILL_SQ_T BS 
+             WHERE C.CONTRACT_ID = p_contract_id
+               AND C.CONTRACT_NO = BS.CONTRACT_NO(+);
+            --    
+            IF v_sq_bill_no IS NULL THEN
+            
+               -- самый первый счет у клиента
+                v_sq_bill_no := 1;
+               -- вносим новую запись в счетчик счетов для клиента     
+                INSERT INTO CONTRACT_BILL_SQ_T(CONTRACT_NO, BILL_SQ, MODIFY_DATE)
+                VALUES(v_contract_no, v_sq_bill_no, SYSDATE);            
+
+            ELSE            
+            
+               v_sq_bill_no := v_sq_bill_no + 1;
+              -- обновляем счетчик счетов клиента
+               UPDATE CONTRACT_BILL_SQ_T 
+                  SET BILL_SQ = v_sq_bill_no,
+                      modify_date = SYSDATE
+                WHERE CONTRACT_NO = v_contract_no;            
+            
+            END IF;
+
+           -- формируем уникальный номер счета            
+            v_bill_no := v_contract_no||'-'||LPAD(TO_CHAR(v_sq_bill_no), 4,'0');  
+            --
+
+        ELSE -- для остальных предполагаем применять правило YYMM(№ Л/С)[A-Z]
+             v_bill_no := SUBSTR(TO_CHAR(p_bill_period_id),3,4)||v_account_no;
+        END IF;    
+    
+        -- т.к. судя по всему кто-то еще вносит данные в bill_t, то проверяем, нет ли сформированного номера
+        -- глупость конечно, но это пока так...
+        SELECT COUNT(*) INTO v_count
+          FROM BILL_T B
+         WHERE B.BILL_NO = v_bill_no;
+        EXIT WHEN v_count = 0;  -- все нормально, выходим из цикла
+        
+    END LOOP;
+    
+    -- с переходом на филиальную структуру, добавляем номер региона
+    IF v_region_id IS NOT NULL THEN
+        v_bill_no := v_region_id||'/'||v_bill_no;
+    END IF;
+    
+    RETURN v_bill_no;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR(account_id=' ||p_account_id||
+                                        ', contract_id='||p_contract_id||
+                                        ', period_id='  ||p_bill_period_id||')'
+                                    , c_PkgName||'.'||v_prcName );
+END;
+
+-- служебная процедура восстановления данных в таблице CONTRACT_BILL_SQ_T
+PROCEDURE Fill_contract_bill_sq_t
+IS
+    v_prcName        CONSTANT VARCHAR2(30) := 'Fill_contract_bill_sq_t';
+    v_count          INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --
+    MERGE INTO CONTRACT_BILL_SQ_T CB
+    USING(
+        WITH BN AS (
+        SELECT C.CONTRACT_NO, A.BILLING_ID, B.BILL_NO,
+               MAX(B.REP_PERIOD_ID) OVER (PARTITION BY C.CONTRACT_NO) MAX_PERIOD_ID,
+               B.REP_PERIOD_ID, SUBSTR(BILL_NO, INSTR(BILL_NO, '-', -1)+1, 4) BILL_SQ     
+          FROM BILL_T B, ACCOUNT_PROFILE_T AP, CONTRACT_T C, ACCOUNT_T A 
+         WHERE B.ACCOUNT_ID = AP.ACCOUNT_ID
+           AND AP.CONTRACT_ID = C.CONTRACT_ID
+           AND A.ACCOUNT_ID   = AP.ACCOUNT_ID
+           AND A.BILLING_ID  = Pk00_Const.c_BILLING_MMTS -- 2003
+        )
+        SELECT BN.CONTRACT_NO, MAX(BN.BILL_SQ) BILL_SQ
+          FROM BN
+         WHERE BN.REP_PERIOD_ID = BN.MAX_PERIOD_ID
+           AND LTRIM(BN.BILL_SQ,'0123456789') IS NULL 
+         GROUP BY BN.CONTRACT_NO
+    ) SQ
+    ON ( CB.CONTRACT_NO = SQ.CONTRACT_NO )
+    WHEN MATCHED THEN UPDATE SET CB.BILL_SQ = SQ.BILL_SQ
+    WHEN NOT MATCHED THEN INSERT (CB.CONTRACT_NO, CB.BILL_SQ) VALUES (SQ.CONTRACT_NO, SQ.BILL_SQ);
+    --
+    v_count := SQL%ROWCOUNT;
+    --
+    Pk01_Syslog.Write_msg('Merged into CONTRACT_BILL_SQ_T '||v_count||' rows', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- создание описателя счетов для нового Л/С
+--   - при ошибке выставляет исключение
+PROCEDURE New_billinfo (
+               p_account_id       IN INTEGER,   -- ID лицевого счета
+               p_currency_id      IN INTEGER,   -- ID валюты счета
+               p_delivery_id      IN INTEGER,   -- ID способа доставки счета
+               p_days_for_payment IN INTEGER DEFAULT 30   -- кол-во дней на оплату счета
+           )
+IS
+    v_prcName        CONSTANT VARCHAR2(30) := 'New_billinfo';
+    v_period_length  INTEGER := 1;
+    v_account_no     ACCOUNT_T.ACCOUNT_NO%TYPE := NULL;
+    v_count          INTEGER;
+    v_utc_date       DATE := SYSDATE;
+    v_local_date     DATE := SYSDATE+GET_TZ_OFFSET;
+BEGIN
+    -- создаем информационную запись о счетах для вновь созданного Л/С
+    INSERT INTO BILLINFO_T ( 
+        ACCOUNT_ID, BILL_NAME, SQ_BILL_NO,
+        PERIOD_LENGTH, CURRENCY_ID, DAYS_FOR_PAYMENT
+    )
+    WITH AC AS (
+        SELECT AP.ACCOUNT_ID, C.CONTRACT_NO BILL_NAME, 0 SQ_BILL_NO, 
+               AP.DATE_FROM, 
+               AP.DATE_TO,
+               ROW_NUMBER() OVER (PARTITION BY AP.ACCOUNT_ID ORDER BY AP.DATE_FROM) RN,
+               CASE
+               WHEN AP.DATE_FROM <= v_local_date AND (AP.DATE_TO IS NULL OR AP.DATE_TO < v_local_date) THEN 1
+               WHEN v_utc_date <= AP.DATE_FROM AND AP.DATE_TO IS NULL THEN 2 -- открыт будущим числом
+               ELSE 0
+               END ITV
+          FROM ACCOUNT_PROFILE_T AP, CONTRACT_T C, CONTRACTOR_T CT
+         WHERE AP.CONTRACT_ID = C.CONTRACT_ID
+           AND AP.BRANCH_ID   = CT.CONTRACTOR_ID
+           AND AP.ACCOUNT_ID  = p_account_id
+    )
+    SELECT ACCOUNT_ID, BILL_NAME, SQ_BILL_NO,
+           v_period_length, p_currency_id, p_days_for_payment
+      FROM AC
+     WHERE (ITV = 1 OR (ITV = 2 AND RN = 1));
+
+     -- Добавляем способ доставки для комплекта документов
+     INSERT INTO 
+            ACCOUNT_DOCUMENTS_T (ACCOUNT_ID,DOC_BILL,DELIVERY_METHOD_ID) 
+       VALUES (p_account_id, 'Y', p_delivery_id);
+
+    /*
+    SELECT AP.ACCOUNT_ID, C.CONTRACT_NO BILL_NAME, 0 SQ_BILL_NO,
+           v_period_length, p_currency_id, p_days_for_payment,
+           p_delivery_id
+      FROM ACCOUNT_PROFILE_T AP, CONTRACT_T C, CONTRACTOR_T CT
+     WHERE AP.CONTRACT_ID = C.CONTRACT_ID
+       AND AP.ACCOUNT_ID  = p_account_id
+       AND ( -- ищем открытую на текущий момент позицию
+           (AP.DATE_FROM <= (SYSDATE+1/6) AND (AP.DATE_TO IS NULL OR AP.DATE_TO < (SYSDATE+1/6))) 
+           OR -- если договор открыт будущим числом
+           (SYSDATE <= AP.DATE_FROM AND AP.DATE_TO IS NULL)
+       )
+       AND AP.BRANCH_ID = CT.CONTRACTOR_ID;
+    */
+    -- 
+    v_count := SQL%ROWCOUNT;
+    IF v_count = 0 THEN
+        -- возможно договор создан будущим числом
+        INSERT INTO BILLINFO_T ( 
+            ACCOUNT_ID, BILL_NAME, SQ_BILL_NO,
+            PERIOD_LENGTH, CURRENCY_ID, DAYS_FOR_PAYMENT, DELIVERY_ID 
+        )
+        SELECT AP.ACCOUNT_ID, C.CONTRACT_NO BILL_NAME, 0 SQ_BILL_NO,
+               v_period_length, p_currency_id, p_days_for_payment,
+               p_delivery_id
+          FROM ACCOUNT_PROFILE_T AP, CONTRACT_T C, CONTRACTOR_T CT
+         WHERE AP.CONTRACT_ID = C.CONTRACT_ID
+           AND AP.ACCOUNT_ID  = p_account_id
+           AND ( 
+               (AP.DATE_FROM <= v_local_date AND (AP.DATE_TO IS NULL OR AP.DATE_TO < v_local_date)) 
+               OR
+               (v_utc_date <= AP.DATE_FROM AND AP.DATE_TO IS NULL)
+           )
+           AND AP.BRANCH_ID = CT.CONTRACTOR_ID;
+    
+        SELECT ACCOUNT_NO INTO v_account_no 
+          FROM ACCOUNT_T 
+         WHERE ACCOUNT_ID = p_account_id;
+        --         
+        Pk01_Syslog.Raise_user_exception('account_id='||p_account_id||
+               ', account_no='||v_account_no||'- данные не найдены', 
+               c_PkgName||'.'||v_prcName);
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- сформировать счет: получить сумму начислений и корректировок счета по позициям
+-- и проставить признак, что счет сформирован , 
+-- т.е. начисления на его позиции не возможны, 
+-- принимаются только оплаты
+-- возвращает:
+-- - возвращаем сумму начислений и корректировок по счету (то что должно быть оплачено)
+-- - при ошибке выставляет исключение
+FUNCTION Generate_bill (
+               p_bill_id       IN INTEGER,   -- ID позиции счета
+               p_rep_period_id IN INTEGER    -- ID периода счета
+           ) RETURN NUMBER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Generate_bill';
+    v_bill_total NUMBER;
+    --
+BEGIN
+    -- суммируем все позиции счета-фактуры (что бы не разойтись по налогам): 
+    UPDATE BILL_T B
+       SET (TOTAL, GROSS, TAX, DUE, BILL_STATUS, CALC_DATE) = (
+          SELECT SUM(II.TOTAL) TOTAL, SUM(II.GROSS) GROSS, SUM(II.TAX) TAX,
+                 -(SUM(II.TOTAL)+SUM(II.GROSS)+SUM(II.TAX)) DUE,
+                 PK00_CONST.c_BILL_STATE_READY,  SYSDATE
+            FROM INVOICE_ITEM_T II
+           WHERE II.BILL_ID = B.BILL_ID
+             AND II.REP_PERIOD_ID = B.REP_PERIOD_ID
+     )
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id
+    RETURNING TOTAL INTO v_bill_total;
+     -- возвращаем сумму начислений и корректировок по счету (то что должно быть оплачено)
+    RETURN v_bill_total;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Рассформировать счет (только для статуса READY): 
+-- обнулить сумму начислений и корректировок счета по позициям
+-- удалить строки счета фактуры, если были сформированы
+-- и вернуть признак OPEN,
+-- т.е. сделать возможными начисления на его позиции 
+-- возвращает:
+--   - положительное - ID счета, 
+--   - при ошибке выставляет исключение
+FUNCTION Rollback_bill (
+               p_bill_id       IN INTEGER,   -- ID позиции счета
+               p_rep_period_id IN INTEGER    -- ID периода счета
+           ) RETURN NUMBER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Rollback_bill';
+    v_bill_status BILL_T.BILL_STATUS%TYPE;
+BEGIN
+    -- проверяем статус счета
+    v_bill_status := Get_status(p_bill_id, p_rep_period_id);
+    IF v_bill_status != PK00_CONST.c_BILL_STATE_READY THEN
+        RAISE_APPLICATION_ERROR(-20000, 'Неверный статус счета (bill_id='||p_bill_id||'): '||v_bill_status);
+    END IF;
+    -- удаляем ссылки на позиции счета фактуры из ITEM
+    UPDATE ITEM_T
+       SET INV_ITEM_ID = NULL
+     WHERE BILL_ID     = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- удаляем позиции счета фактуры
+    DELETE FROM INVOICE_ITEM_T
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- обнуляем суммы счета и возвращаем статус - открыт
+    UPDATE BILL_T
+       SET TOTAL         = 0,
+           GROSS         = 0,
+           TAX           = 0,
+           DUE           = 0, 
+           ADJUSTED      = 0,
+           BILL_STATUS   = PK00_CONST.c_BILL_STATE_OPEN
+     WHERE BILL_ID       = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+     -- возвращаем сумму начислений и корректировок по счету (то что должно быть оплачено)
+     RETURN p_bill_id;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+/**
+Откат счета. Технологическая функция. Нужно пото убить
+**/
+FUNCTION Rollback_bill_force (
+               p_bill_id       IN INTEGER,   -- ID позиции счета
+               p_rep_period_id IN INTEGER    -- ID периода счета
+           ) RETURN NUMBER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Rollback_bill';
+    v_bill_status BILL_T.BILL_STATUS%TYPE;
+BEGIN
+    -- проверяем статус счета
+    v_bill_status := Get_status(p_bill_id, p_rep_period_id);
+    -- удаляем ссылки на позиции счета фактуры из ITEM
+    UPDATE ITEM_T
+       SET INV_ITEM_ID = NULL
+     WHERE BILL_ID     = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- удаляем позиции счета фактуры
+    DELETE FROM INVOICE_ITEM_T
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- обнуляем суммы счета и возвращаем статус - открыт
+    UPDATE BILL_T
+       SET TOTAL         = 0,
+           GROSS         = 0,
+           TAX           = 0,
+           DUE           = 0, 
+           ADJUSTED      = 0,
+           BILL_STATUS   = PK00_CONST.c_BILL_STATE_OPEN
+     WHERE BILL_ID       = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+     -- возвращаем сумму начислений и корректировок по счету (то что должно быть оплачено)
+     RETURN p_bill_id;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ===============================================================================
+-- Перенос счета в другой период
+-- счет должен быть в состоянии 'OPEN', 
+-- иначе перед переносом его следует расформировать
+-- Возвращает bill_id - перенесенного счета
+-- =============================================================================== 
+FUNCTION Move_bill (
+              p_bill_id      IN INTEGER,
+              p_period_id    IN INTEGER,
+              p_period_id_to IN INTEGER,
+              p_bill_date_to IN DATE
+          ) RETURN INTEGER
+IS
+    v_prcName        CONSTANT VARCHAR2(30) := 'Move_bill';
+    v_count          INTEGER;
+    v_bill_id        INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start.', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+   
+    -- создаем копию счета в указанном периоде
+    v_bill_id := SQ_BILL_ID.NEXTVAL;
+
+    INSERT INTO BILL_T (    
+        BILL_ID, REP_PERIOD_ID, ACCOUNT_ID,
+        BILL_NO, BILL_DATE, BILL_TYPE, BILL_STATUS, CURRENCY_ID,
+        TOTAL, GROSS, TAX, RECVD, DUE, DUE_DATE, PAID_TO,
+        PREV_BILL_ID, PREV_BILL_PERIOD_ID, NEXT_BILL_ID, NEXT_BILL_PERIOD_ID,
+        CALC_DATE, ACT_DATE_FROM, ACT_DATE_TO, NOTES, DELIVERY_DATE,
+        ADJUSTED, CONTRACT_ID, VAT, CREATE_DATE, PROFILE_ID, 
+        CONTRACTOR_ID, CONTRACTOR_BANK_ID
+    )
+    SELECT 
+        v_bill_id, p_period_id_to, ACCOUNT_ID,
+        CASE 
+        WHEN B.BILL_TYPE = Pk00_Const.c_BILL_TYPE_ONT
+          THEN '.'||B.BILL_NO
+        WHEN SUBSTR(B.BILL_NO,5,1) = '/' 
+          THEN SUBSTR(B.BILL_NO,5,1)||SUBSTR(TO_CHAR(p_period_id),3,4)||SUBSTR(B.BILL_NO,6)
+        ELSE      
+           SUBSTR(TO_CHAR(p_period_id),3,4)||SUBSTR(B.BILL_NO,5)
+        END BILL_NO,
+        p_bill_date_to, BILL_TYPE, BILL_STATUS, CURRENCY_ID,
+        TOTAL, GROSS, TAX, RECVD, DUE, DUE_DATE, PAID_TO,
+        PREV_BILL_ID, PREV_BILL_PERIOD_ID, NEXT_BILL_ID, NEXT_BILL_PERIOD_ID,
+        CALC_DATE, ACT_DATE_FROM, ACT_DATE_TO, NOTES, DELIVERY_DATE,
+        ADJUSTED, CONTRACT_ID, VAT, CREATE_DATE, PROFILE_ID, 
+        CONTRACTOR_ID, CONTRACTOR_BANK_ID
+      FROM BILL_T B
+     WHERE B.REP_PERIOD_ID = p_period_id
+       AND B.BILL_ID = p_bill_id;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('BILL_T: '||v_count||' created', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('BILL_T.BILL_ID = '||v_bill_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );    
+    --
+    -- переписываем на него ITEM_T
+    UPDATE ITEM_T I 
+       SET I.REP_PERIOD_ID = p_period_id_to, 
+           I.BILL_ID = v_bill_id
+     WHERE I.REP_PERIOD_ID = p_period_id
+       AND I.BILL_ID = p_bill_id;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('ITEM_T: '||v_count||' moved', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    -- удаляем исходный счет
+    DELETE FROM BILL_T B
+     WHERE B.REP_PERIOD_ID = p_period_id
+       AND B.BILL_ID = p_bill_id;
+    v_count := SQL%ROWCOUNT;
+    Pk01_Syslog.Write_msg('BILL_T: '||v_count||' deleted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- восстанавливаем номер счета для одноразового счет
+    UPDATE BILL_T B SET B.BILL_NO = SUBSTR(BILL_NO,2)
+     WHERE B.REP_PERIOD_ID = p_period_id_to
+       AND B.BILL_ID = v_bill_id
+       AND B.BILL_TYPE = Pk00_Const.c_BILL_TYPE_ONT ;
+
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    --    
+    RETURN v_bill_id;
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Рассчитать задолженность по счету
+-- возвращает:
+-- - возвращаем сумму задолженности по счету
+-- - при ошибке выставляет исключение
+FUNCTION Calculate_due(
+               p_bill_id       IN INTEGER,   -- ID позиции счета
+               p_rep_period_id IN INTEGER    -- ID периода счета
+           ) RETURN NUMBER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Calculate_due';
+    v_due        NUMBER;
+    v_i_recvd    NUMBER;
+    v_i_total    NUMBER;
+    v_i_adjusted NUMBER;
+BEGIN
+    -- задолженность по позициям счета не проверяем
+    SELECT SUM(RECVD) RECVD,
+           SUM(ITEM_TOTAL) ITEM_TOTAL
+      INTO v_i_recvd, v_i_total
+      FROM ITEM_T
+     WHERE BILL_ID = p_bill_id 
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- корректировки учитываем при вычислении задолженности счета
+    UPDATE BILL_T B
+       SET B.DUE = v_i_recvd - v_i_total + B.ADJUSTED,
+           B.ADJUSTED = B.ADJUSTED + v_i_adjusted
+     WHERE B.REP_PERIOD_ID = p_rep_period_id 
+       AND B.BILL_ID = p_bill_id 
+    RETURNING DUE INTO v_due;
+     -- возвращаем сумму начислений и корректировок по счету (то что должно быть оплачено)
+     RETURN v_due;
+EXCEPTION   -- при ошибке выставляем исключение
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- найти все позиции указанного счета
+--   - положительное - кол-во выбранных записей
+--   - при ошибке выставляет исключение
+FUNCTION Items_list( 
+               p_recordset    OUT t_refc, 
+               p_bill_id       IN INTEGER,   -- ID позиции счета
+               p_rep_period_id IN INTEGER    -- ID периода счета
+           ) RETURN INTEGER
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Items_list';
+    v_retcode    INTEGER;
+BEGIN
+    -- вычисляем кол-во записей
+    SELECT COUNT(*) INTO v_retcode
+      FROM ITEM_T
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+         SELECT ITEM_ID, ITEM_TYPE, BILL_ID, 
+                ORDER_ID, SERVICE_ID, CHARGE_TYPE,  
+                ITEM_TOTAL, RECVD,  
+                DATE_FROM, DATE_TO, INV_ITEM_ID, ITEM_STATUS
+           FROM ITEM_T
+          WHERE BILL_ID = p_bill_id
+            AND REP_PERIOD_ID = p_rep_period_id
+          ORDER BY ITEM_ID;
+    RETURN v_retcode;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Удалить все позиции указанного счета (скорее всего только сразу после ошибочного создания)
+--   - положительное - кол-во удаленных записей
+--   - при ошибке выставляет исключение
+FUNCTION Delete_items (
+               p_bill_id       IN INTEGER,   -- ID позиции счета
+               p_rep_period_id IN INTEGER    -- ID периода счета
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Delete_items';
+    v_count       INTEGER := 0;
+    v_bill_status BILL_T.BILL_STATUS%TYPE;
+BEGIN
+    -- проверяем статус счета
+    v_bill_status := Get_status(p_bill_id, p_rep_period_id);
+    IF v_bill_status != PK00_CONST.c_BILL_STATE_OPEN THEN
+        RAISE_APPLICATION_ERROR(-20000, 'Неверный статус счета (bill_id='||p_bill_id||'): '||v_bill_status);
+    END IF;  
+    -- проверяем нет ли сформировананных позиций счета фактуры
+    SELECT COUNT(1) INTO v_count
+      FROM INVOICE_ITEM_T
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    IF v_count > 0 THEN
+        RAISE_APPLICATION_ERROR(Pk01_Syslog.n_APP_EXCEPTION, 'Ошибка при удалении позиций счета (item)'
+              ||' BILL_ID='|| p_bill_id ||', '
+              ||', предварительно необходимо удалить позиции счета-фактуры (invoice-item)');
+    END IF;
+    
+    -- неплохо бы проверить и события (event) и отвязать их от позиций счета
+    -- ... сделаю позже
+
+    -- удаляем все позиции указанного счета
+    DELETE 
+      FROM ITEM_T
+     WHERE BILL_ID = p_bill_id
+       AND REP_PERIOD_ID = p_rep_period_id;
+    -- возвращает кол-во удаленных записей
+    RETURN SQL%ROWCOUNT;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+
+END PK07_BILL;
+/

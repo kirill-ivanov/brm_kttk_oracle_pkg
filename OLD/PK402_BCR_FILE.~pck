@@ -1,0 +1,811 @@
+CREATE OR REPLACE PACKAGE PK402_BCR_FILE
+IS
+    --
+    -- Д А Н Н Ы Е   Д Л Я   Э К С П О Р Т А   В   B C R  ( А. Ю. Гуров )
+    --
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK402_BCR_FILE';
+    -- ==============================================================================
+    c_RET_OK      CONSTANT INTEGER     := 0;
+    c_RET_ER		  CONSTANT INTEGER     :=-1;
+    с_BS_DATA_DIR CONSTANT VARCHAR2(11):= 'BS_DATA_DIR';
+    с_BCR_DIR     CONSTANT VARCHAR2(7) := 'BCR_DIR';
+    с_AGENT_DIR   CONSTANT VARCHAR2(9) := 'AGENT_DIR';
+    
+    type t_refc is ref cursor;
+    
+    -- --------------------------------------------------------------------------------- --
+    -- получить координаты продавца
+    -- --------------------------------------------------------------------------------- --
+    FUNCTION Get_sales_curator (
+               p_branch_id     IN INTEGER,
+               p_agent_id      IN INTEGER,
+               p_contract_id   IN INTEGER,
+               p_account_id    IN INTEGER,
+               p_order_id      IN INTEGER,
+               p_date          IN DATE
+             ) RETURN VARCHAR2;
+
+    -- ITEMS
+    PROCEDURE Brm_items_to_file(p_period_id IN INTEGER);
+
+    -- BILLS
+    PROCEDURE Brm_bills_to_file(p_period_id IN INTEGER);
+      
+    -- ORDERS
+    PROCEDURE Brm_orders_to_file;--(p_period_id IN INTEGER);
+
+    -- ACCOUNTS
+    PROCEDURE Brm_accounts_to_file; --(p_period_id IN INTEGER);
+
+    -- PHONES
+    PROCEDURE Brm_phones_to_file;
+
+    -- DELIVERY
+    PROCEDURE Brm_delivery_to_file;
+    
+END PK402_BCR_FILE;
+/
+CREATE OR REPLACE PACKAGE BODY PK402_BCR_FILE
+IS
+
+-- --------------------------------------------------------------------------------- --
+-- получить координаты продавца
+-- --------------------------------------------------------------------------------- --
+FUNCTION Get_sales_curator (
+           p_branch_id     IN INTEGER,
+           p_agent_id      IN INTEGER,
+           p_contract_id   IN INTEGER,
+           p_account_id    IN INTEGER,
+           p_order_id      IN INTEGER,
+           p_date          IN DATE
+         ) RETURN VARCHAR2
+IS
+    v_mgr VARCHAR2(300);
+BEGIN
+      SELECT TRIM(
+             LAST_NAME||' '||
+             SUBSTR(UPPER(FIRST_NAME),1,1)||DECODE(FIRST_NAME,NULL,'','.')||
+             SUBSTR(UPPER(MIDDLE_NAME),1,1)||DECODE(MIDDLE_NAME,NULL,'','.')
+             ) MGR_NAME
+        INTO v_mgr
+        FROM (
+          SELECT M.LAST_NAME, M.FIRST_NAME, M.MIDDLE_NAME,
+                 CASE 
+                   WHEN SC.CONTRACTOR_ID = p_branch_id THEN 1
+                   WHEN SC.CONTRACTOR_ID = p_agent_id  THEN 2
+                   WHEN SC.CONTRACT_ID   IS NOT NULL   THEN 3
+                   WHEN SC.ACCOUNT_ID    IS NOT NULL   THEN 4
+                   WHEN SC.ORDER_ID      IS NOT NULL   THEN 5
+                   ELSE 0
+                 END  WT
+            FROM SALE_CURATOR_T SC, MANAGER_T M
+           WHERE M.MANAGER_ID = SC.MANAGER_ID
+             AND NVL(p_date,SYSDATE) BETWEEN SC.DATE_FROM AND NVL(SC.DATE_TO,SYSDATE) 
+             AND (SC.CONTRACTOR_ID = p_branch_id   OR
+                  SC.CONTRACTOR_ID = p_agent_id    OR
+                  SC.CONTRACT_ID   = p_contract_id OR 
+                  SC.ACCOUNT_ID    = p_account_id  OR 
+                  SC.ORDER_ID      = p_order_id )
+          ORDER BY WT DESC
+      )
+      WHERE ROWNUM = 1
+    ;  
+    RETURN v_mgr;
+EXCEPTION 
+  WHEN NO_DATA_FOUND THEN
+    RETURN NULL;
+END;
+
+-- --------------------------------------------------------------------------------
+-- ITEMS
+-- --------------------------------------------------------------------------------
+PROCEDURE Brm_items_to_file(p_period_id IN INTEGER)
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Export_items_to_file';
+    v_output      UTL_FILE.file_type;
+    v_dir         VARCHAR2(100)      := с_BCR_DIR;
+    v_file_name   VARCHAR2(100 CHAR) := 'items.csv';
+    v_file_tmp    VARCHAR2(100 CHAR) := 'items.tmp';
+    v_count       INTEGER;
+    v_period_from DATE;
+    v_period_to   DATE;
+    
+BEGIN    
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    v_period_from := Pk04_Period.Period_from(p_period_id);
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    -- ------------------------------------------------------------------ --
+    -- записываем информацию в Файл
+    -- ------------------------------------------------------------------ --
+    v_count := 0;
+    v_output := UTL_FILE.fopen( v_dir, v_file_tmp, 'W', 32767 );
+
+    -- сохраняем заголовок
+    UTL_FILE.put(v_output, 'BILL_ID;BILL_NO;ORDER_ID;ORDER_NO;');
+    UTL_FILE.put(v_output, 'INV_ITEM_ID;INV_ITEM_NAME;IV_DATE_FROM;IV_DATE_TO;');
+    UTL_FILE.put(v_output, 'SERVICE_ID;SERVICE;SERVICE_CODE;SERVICE_REP_ID;');
+    UTL_FILE.put(v_output, 'SUBSERVICE_ID;SUBSERVICE;SUBSERVICE_KEY;');
+    UTL_FILE.put(v_output, 'ITEM_ID;ITEM_TYPE;CHARGE_TYPE;I_DATE_FROM;I_DATE_TO;REP_GROSS;REP_TAX;');
+    UTL_FILE.put_line(v_output, 'MINS;SALES_MANAGER');
+
+    -- сохраняем строки
+    FOR item IN (
+        WITH BDR AS( -- трафик минуты
+            -- клиенты Юр. лица
+            SELECT DJ.ITEM_ID, SUM(MINUTES) MINS 
+              FROM DETAIL_MMTS_T_JUR DJ
+             WHERE DJ.REP_PERIOD_ID = p_period_id
+             GROUP BY DJ.ITEM_ID
+            UNION ALL
+            -- клиенты Физ. лица
+            SELECT DF.ITEM_ID, SUM(DF.MINS_SUM) MINS
+              FROM DETAIL_MMTS_T_FIZ DF
+             WHERE DF.REP_PERIOD_ID = p_period_id
+             GROUP BY DF.ITEM_ID
+            UNION ALL
+            -- операторы
+            SELECT ITEM_ID, SUM(BILL_MINUTES) MINS
+              FROM BDR_OPER_T
+             WHERE REP_PERIOD BETWEEN v_period_from AND v_period_to
+            GROUP BY ITEM_ID ),
+         PF AS (
+            SELECT AP.ACCOUNT_ID, 
+                   AP.PROFILE_ID,
+                   AP.CONTRACT_ID,
+                   AP.CONTRACTOR_ID, 
+                   CA.CONTRACTOR, 
+                   AP.CONTRACTOR_BANK_ID BANK_ID, 
+                   CB.NOTES BANK,
+                   NULL BRAND_ID, -- AP.BRAND_ID, -- ДАННЫЕ НЕ ВЕДУТСЯ В BRAND_T!!!
+                   NULL BRAND,    -- BR.BRAND,    -- ДАННЫЕ НЕ ВЕДУТСЯ В BRAND_T!!!
+                   BRANCH.CONTRACTOR_ID XTTK_ID, 
+                   BRANCH.CONTRACTOR XTTK, 
+                   BRANCH.EXTERNAL_ID XTTK_OBJ_ID0,
+                   AGENT.CONTRACTOR_ID AGENT_ID,      
+                   AGENT.CONTRACTOR  AGENT, 
+                   AGENT.EXTERNAL_ID AGENT_OBJ_ID0,
+                   AP.DATE_FROM, 
+                   NVL(AP.DATE_TO,SYSDATE) DATE_TO
+              FROM ACCOUNT_PROFILE_T AP, --BRAND_T BR, 
+                   CONTRACTOR_BANK_T CB,
+                   CONTRACTOR_T BRANCH, 
+                   CONTRACTOR_T AGENT, 
+                   CONTRACTOR_T CA  
+             WHERE AP.CONTRACTOR_ID      = CA.CONTRACTOR_ID 
+               --AND AP.BRAND_ID           = BR.BRAND_ID(+)
+               AND DECODE(AP.BRANCH_ID,200,11,AP.BRANCH_ID)= BRANCH.CONTRACTOR_ID(+)
+               AND DECODE(AP.BRANCH_ID,200,AP.BRANCH_ID,NVL(AP.AGENT_ID,AP.BRANCH_ID)) = AGENT.CONTRACTOR_ID(+)
+               AND AP.CONTRACTOR_BANK_ID = CB.BANK_ID(+)
+        )
+        SELECT TO_CHAR(TRUNC(v_period_to),'dd.mm.yyyy')||';'|| -- REP_PERIOD, 
+               B.BILL_ID||';'||
+               B.BILL_NO||';'||
+               O.ORDER_ID||';'||
+               O.ORDER_NO||';'||
+               IV.INV_ITEM_ID||';'||
+               IV.INV_ITEM_NAME||';'||
+               TO_CHAR(IV.DATE_FROM,'dd.mm.yyyy')||';'||           -- IV_DATE_FROM,
+               TO_CHAR(TRUNC(IV.DATE_TO,'DD'),'dd.mm.yyyy')||';'|| --  IV_DATE_TO,
+               I.SERVICE_ID||';'||
+               S.SERVICE||';'||
+               S.SERVICE_CODE||';'||
+               NVL(S.EXTERNAL_ID,9999)||';'|| -- SERVICE_REP_ID,
+               I.SUBSERVICE_ID||';'||
+               SS.SUBSERVICE||';'||
+               SS.SUBSERVICE_KEY||';'||
+               I.ITEM_ID||';'||
+               I.ITEM_TYPE||';'||
+               I.CHARGE_TYPE||';'||
+               TO_CHAR(I.DATE_FROM,'dd.mm.yyyy')||';'|| -- I_DATE_FROM, 
+               TO_CHAR(I.DATE_TO,'dd.mm.yyyy')||';'|| --  I_DATE_TO, 
+               I.REP_GROSS||';'|| 
+               I.REP_TAX||';'||
+               ROUND(BDR.MINS,6)||';'|| -- MINS,
+               PK402_BCR_DATA.Get_sales_curator (
+                       p_branch_id      => PF.XTTK_ID,
+                       p_agent_id       => PF.AGENT_ID,
+                       p_contract_id    => PF.CONTRACT_ID,
+                       p_account_id     => B.ACCOUNT_ID,
+                       p_order_id       => O.ORDER_ID,
+                       p_date           => v_period_to
+                     ) --SALES_MANAGER
+            AS TXT
+          FROM BILL_T B, 
+               ACCOUNT_T A, 
+               ITEM_T I, 
+               ORDER_T O, 
+               BDR, 
+               PF, 
+               INVOICE_ITEM_T IV, 
+               SERVICE_T S, 
+               SUBSERVICE_T SS
+         WHERE B.REP_PERIOD_ID = p_period_id
+           AND B.ACCOUNT_ID    = A.ACCOUNT_ID
+           AND B.BILL_ID       = I.BILL_ID
+           AND B.REP_PERIOD_ID = I.REP_PERIOD_ID
+           AND O.ORDER_ID      = I.ORDER_ID
+           AND B.PROFILE_ID    = PF.PROFILE_ID
+           AND I.ITEM_ID       = BDR.ITEM_ID(+)
+           AND I.REP_PERIOD_ID = IV.REP_PERIOD_ID
+           AND I.INV_ITEM_ID   = IV.INV_ITEM_ID
+           AND I.SERVICE_ID    = S.SERVICE_ID
+           AND I.SUBSERVICE_ID = SS.SUBSERVICE_ID
+           AND B.TOTAL <> 0 
+           AND B.BILL_STATUS IN (
+                   Pk00_Const.c_BILL_STATE_READY,
+                   Pk00_Const.c_BILL_STATE_CLOSED
+               )
+           AND A.BILLING_ID NOT IN (
+                   Pk00_Const.c_BILLING_ACCESS,
+                   Pk00_Const.c_BILLING_OLD_NO_1C,
+                   Pk00_Const.c_BILLING_TEST
+               ) 
+           AND A.STATUS = Pk00_Const.c_ACC_STATUS_BILL -- 'B'
+    ) LOOP
+        UTL_FILE.put_line( v_output, item.txt ) ;
+        v_count := v_count + 1;
+        
+        IF MOD(v_count,10000) = 0 THEN
+            Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+        END IF;
+        
+    END LOOP;
+    UTL_FILE.fclose( v_output ) ;
+
+    UTL_FILE.frename(src_location => v_dir ,src_filename => v_file_tmp ,
+                     dest_location => v_dir ,dest_filename => v_file_name ,overwrite => TRUE);
+
+    Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- --------------------------------------------------------------------------------
+-- BILLS
+-- --------------------------------------------------------------------------------
+PROCEDURE Brm_bills_to_file(p_period_id IN INTEGER)
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Brm_bills_to_file';
+    v_output      UTL_FILE.file_type;
+    v_dir         VARCHAR2(100)      := с_BCR_DIR;
+    v_file_name   VARCHAR2(100 CHAR) := 'bills.csv';
+    v_file_tmp    VARCHAR2(100 CHAR) := 'bills.tmp';
+    v_count       INTEGER;
+    v_period_to   DATE;
+    
+BEGIN    
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    v_period_to   := Pk04_Period.Period_to(p_period_id);
+    -- ------------------------------------------------------------------ --
+    -- записываем информацию в Файл
+    -- ------------------------------------------------------------------ --
+    v_count := 0;
+    v_output := UTL_FILE.fopen( v_dir, v_file_tmp, 'W', 32767 );
+
+    -- сохраняем заголовок
+    UTL_FILE.put(v_output, 'REP_PERIOD;BILL_ID;ACCOUNT_STATUS;');
+    UTL_FILE.put(v_output, 'PREV_BILL_ID;NEXT_BILL_ID;');
+    UTL_FILE.put(v_output, 'BILL_TYPE;BILL_NO;BILL_DATE;ACT_DATE_TO;');
+    UTL_FILE.put(v_output, 'CURRENCY_ID;TOTAL;GROSS,TAX;');
+    UTL_FILE.put(v_output, 'ACCOUNT_ID;ACCOUNT_NO;ACCOUNT_TYPE;');
+    UTL_FILE.put(v_output, 'CONTRACTOR_ID;CONTRACTOR;BRAND_ID;BRAND;');
+    UTL_FILE.put(v_output, 'XTTK_ID;XTTK;XTTK_OBJ_ID0;');
+    UTL_FILE.put(v_output, 'AGENT_ID;AGENT;AGENT_OBJ_ID0;');
+    UTL_FILE.put_line(v_output, 'BANK_ID;BANK');
+
+    -- сохраняем строки
+    FOR bill IN (
+        SELECT TO_CHAR(v_period_to,'dd.mm.yyyy')||';'||   --REP_PERIOD, 
+               B.BILL_ID||';'|| 
+               A.STATUS||';'|| -- account_status,
+               B.PREV_BILL_ID||';'||
+               B.NEXT_BILL_ID||';'||
+               B.BILL_TYPE||';'||
+               B.BILL_NO||';'||
+               TO_CHAR(B.BILL_DATE,'dd.mm.yyyy')||';'||   --BILL_DATE, 
+               TO_CHAR(B.ACT_DATE_FROM,'dd.mm.yyyy')||';'||
+               TO_CHAR(B.ACT_DATE_TO,'dd.mm.yyyy')||';'|| -- ACT_DATE_TO,
+               B.CURRENCY_ID||';'||
+               B.TOTAL||';'||
+               B.GROSS||';'||
+               B.TAX||';'||
+               B.ACCOUNT_ID||';'|| 
+               A.ACCOUNT_NO||';'|| 
+               A.ACCOUNT_TYPE||';'||
+               B.CONTRACTOR_ID||';'||
+               CA.CONTRACTOR||';'||
+               ';'||                       -- AP.BRAND_ID, 
+               ';'||                       -- NULL BR.BRAND,
+               BRANCH.CONTRACTOR_ID||';'|| -- XTTK_ID, 
+               BRANCH.CONTRACTOR||';'||    -- XTTK, 
+               BRANCH.EXTERNAL_ID||';'||   -- XTTK_OBJ_ID0,
+               AGENT.CONTRACTOR_ID||';'||  -- AGENT_ID, 
+               AGENT.CONTRACTOR||';'||     -- AGENT, 
+               AGENT.EXTERNAL_ID||';'||    -- AGENT_OBJ_ID0,
+               B.CONTRACTOR_BANK_ID||';'|| -- BANK_ID, 
+               CB.NOTES                    -- BANK
+               AS TXT
+          FROM BILL_T B, 
+               ACCOUNT_T A, 
+               ACCOUNT_PROFILE_T AP, 
+               --BRAND_T BR,               -- данные не ведутся
+               CONTRACTOR_BANK_T CB,
+               CONTRACTOR_T BRANCH, 
+               CONTRACTOR_T AGENT, 
+               CONTRACTOR_T CA
+         WHERE B.REP_PERIOD_ID = p_period_id
+           AND B.ACCOUNT_ID    = A.ACCOUNT_ID
+           AND B.PROFILE_ID    = AP.PROFILE_ID
+           AND B.CONTRACTOR_ID = CA.CONTRACTOR_ID
+           AND B.CONTRACTOR_BANK_ID = CB.BANK_ID
+           --AND AP.BRAND_ID = BR.BRAND_ID(+)
+           AND DECODE(AP.BRANCH_ID,200,11,AP.BRANCH_ID) = BRANCH.CONTRACTOR_ID(+)
+           AND DECODE(AP.BRANCH_ID,200,AP.BRANCH_ID,NVL(AP.AGENT_ID,AP.BRANCH_ID)) = AGENT.CONTRACTOR_ID(+)
+           AND B.TOTAL <> 0 
+           AND B.BILL_STATUS IN (
+                   Pk00_Const.c_BILL_STATE_READY,
+                   Pk00_Const.c_BILL_STATE_CLOSED
+               )
+           AND A.BILLING_ID NOT IN (
+                   Pk00_Const.c_BILLING_ACCESS,
+                   Pk00_Const.c_BILLING_OLD_NO_1C,
+                   Pk00_Const.c_BILLING_TEST
+               ) 
+           AND A.STATUS = Pk00_Const.c_ACC_STATUS_BILL -- 'B'
+    ) LOOP
+        UTL_FILE.put_line( v_output, bill.txt ) ;
+        v_count := v_count + 1;
+        
+        IF MOD(v_count,10000) = 0 THEN
+            Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+        END IF;
+        
+    END LOOP;
+    UTL_FILE.fclose( v_output ) ;
+
+    UTL_FILE.frename(src_location => v_dir ,src_filename => v_file_tmp ,
+                     dest_location => v_dir ,dest_filename => v_file_name ,overwrite => TRUE);
+
+    Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- --------------------------------------------------------------------------------
+-- ORDERS
+-- --------------------------------------------------------------------------------
+PROCEDURE Brm_orders_to_file
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Brm_orders_to_file';
+    v_output      UTL_FILE.file_type;
+    v_dir         VARCHAR2(100)      := с_BCR_DIR;
+    v_file_name   VARCHAR2(100 CHAR) := 'orders.csv';
+    v_file_tmp    VARCHAR2(100 CHAR) := 'orders.tmp';
+    v_count       INTEGER;
+    
+BEGIN    
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    -- ------------------------------------------------------------------ --
+    -- записываем информацию в Файл
+    -- ------------------------------------------------------------------ --
+    v_count := 0;
+    v_output := UTL_FILE.fopen( v_dir, v_file_tmp, 'W', 32767 );
+
+    -- сохраняем заголовок
+    UTL_FILE.put(v_output, 'ORDER_ID;ACCOUNT_ID;ORDER_NO;DATE_FROM;DATE_TO;');
+    UTL_FILE.put(v_output, 'SERVICE_ID;SERVICE_CODE;SERVICE_REP_ID;');
+    UTL_FILE.put_line(v_output, 'RATEPLAN_ID;RATEPLAN_NAME;AGENT_PERCENT');
+
+    -- сохраняем строки
+    FOR ord IN (
+        WITH D AS (
+            SELECT 
+                O.ORDER_ID,
+                O.ACCOUNT_ID,
+                O.ORDER_NO, 
+                O.DATE_FROM, 
+                TRUNC(DECODE(SIGN(O.DATE_TO-O.DATE_FROM),-1,O.DATE_FROM,O.DATE_TO),'DD') DATE_TO, 
+                O.SERVICE_ID,
+                S.SERVICE_CODE,
+                S.EXTERNAL_ID SERVICE_REP_ID,
+                P.RATEPLAN_ID,
+                P.RATEPLAN_NAME,
+                P.AGENT_PERCENT,
+                ROW_NUMBER() OVER (PARTITION BY OB.ORDER_ID ORDER BY DECODE(OB.CHARGE_TYPE, 'USG', 1, 'REC', 2, 3)) RN
+             FROM ORDER_T O, 
+                  SERVICE_T S, 
+                  ACCOUNT_T A, 
+                  ORDER_BODY_T OB, 
+                  RATEPLAN_T P
+            WHERE O.SERVICE_ID = S.SERVICE_ID
+              AND O.ORDER_NO IS NOT NULL
+              AND O.ACCOUNT_ID = A.ACCOUNT_ID         
+              AND A.BILLING_ID NOT IN (
+                       Pk00_Const.c_BILLING_ACCESS,
+                       Pk00_Const.c_BILLING_OLD_NO_1C,
+                       Pk00_Const.c_BILLING_TEST
+                  )
+              AND O.ORDER_ID = OB.ORDER_ID
+              AND OB.RATEPLAN_ID = P.RATEPLAN_ID (+)
+        )
+        SELECT ORDER_ID||';'||ACCOUNT_ID||';'||ORDER_NO||';'||DATE_FROM||';'||DATE_TO||';'||
+               SERVICE_ID||';'||SERVICE_CODE||';'||SERVICE_REP_ID||';'||
+               RATEPLAN_ID||';'||RATEPLAN_NAME||';'||AGENT_PERCENT
+            AS TXT
+          FROM D
+         WHERE D.RN = 1
+    ) LOOP
+        UTL_FILE.put_line( v_output, ord.txt ) ;
+        v_count := v_count + 1;
+        
+        IF MOD(v_count,10000) = 0 THEN
+            Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+        END IF;
+        
+    END LOOP;
+    UTL_FILE.fclose( v_output ) ;
+
+    UTL_FILE.frename(src_location => v_dir ,src_filename => v_file_tmp ,
+                     dest_location => v_dir ,dest_filename => v_file_name ,overwrite => TRUE);
+
+    Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- --------------------------------------------------------------------------------
+-- ACCOUNTS
+-- --------------------------------------------------------------------------------
+PROCEDURE Brm_accounts_to_file
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Brm_accounts_to_file';
+    v_output      UTL_FILE.file_type;
+    v_dir         VARCHAR2(100)      := с_BCR_DIR;
+    v_file_name   VARCHAR2(100 CHAR) := 'accounts.csv';
+    v_file_tmp    VARCHAR2(100 CHAR) := 'accounts.tmp';
+    v_count       INTEGER;
+    v_period_to   DATE;
+   
+BEGIN    
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    v_period_to := LAST_DAY(ADD_MONTHS(TRUNC(SYSDATE),-1));
+    -- ------------------------------------------------------------------ --
+    -- записываем информацию в Файл
+    -- ------------------------------------------------------------------ --
+    v_count := 0;
+    v_output := UTL_FILE.fopen( v_dir, v_file_tmp, 'W', 32767 );
+
+    -- сохраняем заголовок
+    UTL_FILE.put(v_output, 'ACCOUNT_ID;ACCOUNT_TYPE;ACCOUNT_NO;');
+    UTL_FILE.put(v_output, 'CONTRACT_ID;CONTRACT_NO;CUST_NAME;CLIENT_ID;DATE_FROM;DATE_TO;');
+    UTL_FILE.put(v_output, 'MSEG_ID;MSEG_NAME;TYPE_ID;TYPE_NAME;BRAND_ID;BRAND;');
+    UTL_FILE.put(v_output, 'CONTRACTOR_ID;CONTRACTOR;BANK_ID;BANK;');
+    UTL_FILE.put(v_output, 'XTTK_ID;XTTK;XTTK_OBJ_ID0,');
+    UTL_FILE.put(v_output, 'AGENT_ID;AGENT;AGENT_OBJ_ID0;');
+    UTL_FILE.put(v_output, 'CURRENCY_ID;VAT;');
+    UTL_FILE.put(v_output, 'ERP_CODE;INN;KPP;');
+    UTL_FILE.put(v_output, 'DLV_COUNTRY;DLV_ZIP;DLV_STATE;DLV_CITY;DLV_ADDRESS;');
+    UTL_FILE.put(v_output, 'DLV_PERSON;DLV_PHONES;DLV_EMAIL;DLV_NOTES;');
+    UTL_FILE.put(v_output, 'BILLING_ID;SALES_MANAGER;');
+    UTL_FILE.put_line(v_output, 'DLV_METHOD');
+
+    -- сохраняем строки
+    FOR account IN (
+        WITH 
+          AP_MAX AS ( -- последний профиль л/с зарегистрированный в BRM  
+              SELECT ACCOUNT_ID, PROFILE_ID 
+                FROM (
+                  SELECT ACCOUNT_ID, PROFILE_ID,
+                         ROW_NUMBER() OVER (PARTITION BY ACCOUNT_ID ORDER BY DATE_FROM) RN
+                    FROM ACCOUNT_PROFILE_T
+                 )
+                WHERE RN = 1 
+          ),          
+          D_SEG AS (
+              SELECT KEY_ID MSEG_ID, NAME MSEG_NAME FROM PIN.DICTIONARY_T D 
+               WHERE D.PARENT_ID = 63
+          ), 
+          D_TYP AS (
+              SELECT KEY_ID TYPE_ID, NAME TYPE_NAME FROM PIN.DICTIONARY_T D 
+               WHERE D.PARENT_ID = 64
+          ), 
+          D_DLV AS (
+              SELECT KEY_ID DLV_ID, NAME DLV_METHOD FROM PIN.DICTIONARY_T D 
+               WHERE D.PARENT_ID = 65
+          ),
+          ACC AS (
+              SELECT DISTINCT 
+                     A.ACCOUNT_ID, 
+                     A.ACCOUNT_TYPE, 
+                     A.ACCOUNT_NO, 
+                     C.CONTRACT_ID, 
+                     C.CONTRACT_NO, 
+                     DECODE(A.ACCOUNT_TYPE, 
+                            'P', SU.LAST_NAME ||' '||SU.FIRST_NAME||' '||SU.MIDDLE_NAME, 
+                            'J', CU.CUSTOMER, NULL) CUST_NAME,
+                     C.CLIENT_ID, 
+                     C.DATE_FROM, 
+                     C.DATE_TO, 
+                     D_SEG.MSEG_ID, 
+                     D_SEG.MSEG_NAME, 
+                     D_TYP.TYPE_ID, 
+                     D_TYP.TYPE_NAME,
+                     NULL, -- BR.BRAND_ID, 
+                     NULL, -- BR.BRAND, 
+                     CT.CONTRACTOR_ID, 
+                     CT.CONTRACTOR, 
+                     CB.BANK_ID, 
+                     CB.NOTES BANK,
+                     XTTK.CONTRACTOR_ID XTTK_ID, 
+                     XTTK.CONTRACTOR XTTK, 
+                     XTTK.EXTERNAL_ID XTTK_OBJ_ID0,
+                     AG.CONTRACTOR_ID AGENT_ID, 
+                     AG.CONTRACTOR AGENT, 
+                     AG.EXTERNAL_ID AGENT_OBJ_ID0,
+                     A.CURRENCY_ID, 
+                     AP.VAT, 
+                     CU.ERP_CODE, 
+                     CU.INN, 
+                     CU.KPP,
+                     AD.COUNTRY DLV_COUNTRY, 
+                     AD.ZIP DLV_ZIP, 
+                     AD.STATE DLV_STATE, 
+                     AD.CITY DLV_CITY, 
+                     AD.ADDRESS DLV_ADDRESS, 
+                     AD.PERSON DLV_PERSON, 
+                     AD.PHONES DLV_PHONES, 
+                     AD.EMAIL DLV_EMAIL, 
+                     AD.NOTES DLV_NOTES, 
+                     A.BILLING_ID,
+                     PK402_BCR_DATA.Get_sales_curator (
+                                       XTTK.CONTRACTOR_ID, 
+                                       AG.CONTRACTOR_ID, 
+                                       C.CONTRACT_ID, 
+                                       A.ACCOUNT_ID, 
+                                       NULL,
+                                       v_period_to
+                                   ) SALES_MANAGER, 
+                     D_DLV.DLV_METHOD
+                FROM ACCOUNT_T A, 
+                     ACCOUNT_PROFILE_T AP, 
+                     --BRAND_T BR,  -- НЕ ПОДДЕРЖИВАЕТСЯ
+                     CONTRACT_T C, 
+                     CUSTOMER_T CU, 
+                     SUBSCRIBER_T SU, 
+                     D_SEG, 
+                     D_TYP, 
+                     CONTRACTOR_T CT, 
+                     CONTRACTOR_T XTTK, 
+                     CONTRACTOR_T AG, 
+                     ACCOUNT_CONTACT_T AD, 
+                     CONTRACTOR_BANK_T CB,
+                     ACCOUNT_DOCUMENTS_T AL, 
+                     D_DLV, 
+                     AP_MAX        
+               WHERE A.ACCOUNT_ID        = AP_MAX.ACCOUNT_ID   
+                 AND AP.PROFILE_ID       = AP_MAX.PROFILE_ID
+                 --AND AP.BRAND_ID       = BR.BRAND_ID(+)
+                 AND AP.CONTRACT_ID      = C.CONTRACT_ID
+                 AND AP.CUSTOMER_ID      = CU.CUSTOMER_ID(+)
+                 AND AP.SUBSCRIBER_ID    = SU.SUBSCRIBER_ID(+)
+                 AND C.MARKET_SEGMENT_ID = D_SEG.MSEG_ID(+)
+                 AND C.CLIENT_TYPE_ID    = D_TYP.TYPE_ID(+)
+                 AND AP.CONTRACTOR_ID    = CT.CONTRACTOR_ID(+)
+                 AND DECODE(AP.BRANCH_ID,200,11,AP.BRANCH_ID) = XTTK.CONTRACTOR_ID(+)
+                 AND DECODE(AP.BRANCH_ID,200,AP.BRANCH_ID,NVL(AP.AGENT_ID,AP.BRANCH_ID)) = AG.CONTRACTOR_ID(+)
+                 AND A.ACCOUNT_ID        = AD.ACCOUNT_ID(+) 
+                 AND AD.ADDRESS_TYPE(+)  = Pk00_Const.c_ADDR_TYPE_DLV
+                 AND A.BILLING_ID NOT IN (
+                           Pk00_Const.c_BILLING_ACCESS,
+                           Pk00_Const.c_BILLING_OLD_NO_1C,
+                           Pk00_Const.c_BILLING_TEST
+                      )
+                 AND AP.CONTRACTOR_BANK_ID = CB.BANK_ID(+)
+                 AND A.ACCOUNT_ID = AL.ACCOUNT_ID(+) 
+                 AND AL.DOC_BILL(+) = 'Y'
+                 AND AL.DELIVERY_METHOD_ID = D_DLV.DLV_ID(+)
+          )
+          SELECT 
+                ACCOUNT_ID||';'|| 
+                ACCOUNT_TYPE||';'|| 
+                ACCOUNT_NO||';'||
+                CONTRACT_ID||';'||
+                CONTRACT_NO||';'||
+                CUST_NAME||';'||
+                CLIENT_ID||';'||
+                TO_CHAR(DATE_FROM,'dd.mm.yyyy')||';'||
+                TO_CHAR(DATE_TO,'dd.mm.yyyy')||';'||
+                MSEG_ID||';'||
+                MSEG_NAME||';'||
+                TYPE_ID||';'||
+                TYPE_NAME||';'||
+                ';'||                -- NBR.BRAND_ID
+                ';'||                -- BR.BRAND
+                CONTRACTOR_ID||';'||
+                CONTRACTOR||';'||
+                BANK_ID||';'||
+                BANK||';'||
+                XTTK_ID||';'||
+                XTTK||';'||
+                XTTK_OBJ_ID0||';'||
+                AGENT_ID||';'||
+                AGENT||';'||
+                AGENT_OBJ_ID0||';'||
+                CURRENCY_ID||';'||
+                VAT||';'||
+                ERP_CODE||';'||
+                INN||';'|| 
+                KPP||';'||
+                DLV_COUNTRY||';'||
+                DLV_ZIP||';'||
+                DLV_STATE||';'||
+                DLV_CITY||';'||
+                DLV_ADDRESS||';'||
+                DLV_PERSON||';'||
+                DLV_PHONES||';'||
+                DLV_EMAIL||';'||
+                DLV_NOTES||';'||
+                BILLING_ID||';'||
+                SALES_MANAGER||';'||
+                DLV_METHOD
+              AS TXT
+            FROM ACC
+    ) LOOP
+        UTL_FILE.put_line( v_output, account.txt ) ;
+        v_count := v_count + 1;
+        
+        IF MOD(v_count,10000) = 0 THEN
+            Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+        END IF;
+        
+    END LOOP;
+    UTL_FILE.fclose( v_output ) ;
+
+    UTL_FILE.frename(src_location => v_dir ,src_filename => v_file_tmp ,
+                     dest_location => v_dir ,dest_filename => v_file_name ,overwrite => TRUE);
+
+    Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- --------------------------------------------------------------------------------
+-- PHONES
+-- --------------------------------------------------------------------------------
+PROCEDURE Brm_phones_to_file
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Brm_phones_to_file';
+    v_output      UTL_FILE.file_type;
+    v_dir         VARCHAR2(100)      := с_BCR_DIR;
+    v_file_name   VARCHAR2(100 CHAR) := 'phones.csv';
+    v_file_tmp    VARCHAR2(100 CHAR) := 'phones.tmp';
+    v_count       INTEGER;
+BEGIN    
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    -- ------------------------------------------------------------------ --
+    -- записываем информацию в Файл
+    -- ------------------------------------------------------------------ --
+    v_count := 0;
+    v_output := UTL_FILE.fopen( v_dir, v_file_tmp, 'W' );
+
+    -- сохраняем заголовок
+    UTL_FILE.put_line(v_output, 'ORDER_ID;ORDER_NO;PHONE_NUMBER;DATE_FROM;DATE_TO');
+
+    -- сохраняем строки
+    FOR phone IN (
+        SELECT O.ORDER_ID||';'|| 
+               O.ORDER_NO||';'|| 
+               OP.PHONE_NUMBER||';'||
+               TO_CHAR(OP.DATE_FROM,'dd.mm.yyyy')||';'||
+               TO_CHAR(OP.DATE_TO,'dd.mm.yyyy') 
+            AS TXT
+          FROM ORDER_PHONES_T OP, 
+               ORDER_T O, 
+               ACCOUNT_T A
+         WHERE OP.ORDER_ID = O.ORDER_ID
+           AND O.ACCOUNT_ID = A.ACCOUNT_ID         
+           AND A.BILLING_ID NOT IN (
+                   Pk00_Const.c_BILLING_ACCESS,
+                   Pk00_Const.c_BILLING_OLD_NO_1C,
+                   Pk00_Const.c_BILLING_TEST
+              )
+    ) LOOP
+        UTL_FILE.put_line( v_output, phone.txt ) ;
+        v_count := v_count + 1;
+        
+        IF MOD(v_count,10000) = 0 THEN
+            Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+        END IF;
+        
+    END LOOP;
+    UTL_FILE.fclose( v_output ) ;
+
+    UTL_FILE.frename(src_location => v_dir ,src_filename => v_file_tmp ,
+                     dest_location => v_dir ,dest_filename => v_file_name ,overwrite => TRUE);
+
+    Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+-- --------------------------------------------------------------------------------
+-- DELIVERY
+-- --------------------------------------------------------------------------------
+PROCEDURE Brm_delivery_to_file
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Brm_delivery_to_file';
+    v_output      UTL_FILE.file_type;
+    v_dir         VARCHAR2(100)      := с_BCR_DIR;
+    v_file_name   VARCHAR2(100 CHAR) := 'delivery.csv';
+    v_file_tmp    VARCHAR2(100 CHAR) := 'delivery.tmp';
+    v_count       INTEGER;
+BEGIN    
+    Pk01_Syslog.Write_msg('Start', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+    -- ------------------------------------------------------------------ --
+    -- записываем информацию в Файл
+    -- ------------------------------------------------------------------ --
+    v_count := 0;
+    v_output := UTL_FILE.fopen( v_dir, v_file_tmp, 'W' );
+
+    -- сохраняем заголовок
+    UTL_FILE.put_line(v_output, 'ACCOUNT_ID;DLV_ID;DLV_NAME;DLV_OBJ_ID0');
+
+    -- сохраняем строки
+    FOR dlv IN (
+        SELECT A.ACCOUNT_ID||';'|| 
+               D.KEY_ID||';'|| -- DLV_ID, 
+               D.NAME||';'||   -- DLV_NAME, 
+               D.EXTERNAL_ID   -- DLV_OBJ_ID0 
+            AS TXT
+          FROM ACCOUNT_DOCUMENTS_T a, DICTIONARY_T d
+        WHERE D.PARENT_ID = 65
+          AND A.DELIVERY_METHOD_ID = D.KEY_ID
+    ) LOOP
+        UTL_FILE.put_line( v_output, dlv.txt ) ;
+        v_count := v_count + 1;
+        
+        IF MOD(v_count,10000) = 0 THEN
+            Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+        END IF;
+        
+
+    END LOOP;
+    UTL_FILE.fclose( v_output ) ;
+
+    UTL_FILE.frename(src_location => v_dir ,src_filename => v_file_tmp ,
+                     dest_location => v_dir ,dest_filename => v_file_name ,overwrite => TRUE);
+
+    Pk01_Syslog.Write_msg('file '||v_file_name||' - '||v_count||' rows inserted', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    Pk01_Syslog.Write_msg('Stop', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('Stop.ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+END PK402_BCR_FILE;
+/

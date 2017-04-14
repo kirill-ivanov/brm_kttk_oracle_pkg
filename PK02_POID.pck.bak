@@ -1,0 +1,280 @@
+CREATE OR REPLACE PACKAGE PK02_POID
+IS
+    -- ==============================================================================
+    c_PkgName   CONSTANT varchar2(30) := 'PK02_POID';
+    
+    -- ==============================================================================
+    -- Общие правила формирования PK секционированных таблиц, связанных со счетом:
+    --
+    -- формат ID: YYMM.000.000.000,
+    -- где YYMM - дата расчетного периода
+    -- 000.000.000 - циклический счетчик из последовательности SQ_BILL_ID, SQ_EVENT_ID,
+    -- на биллинговый период 1 млрд. записей должно хватить с большим запасом
+    
+    c_Offset CONSTANT number := 9; -- кол-во знаков в циклическом счетчике 
+    
+    --
+    -- Перечень таблиц:
+    --     bill_t             - bill_id
+    --     invoice_item_t     - inv_item_id
+    --     item_t             - item_id
+    --     item_transfer_t    - transfer_id
+    --     event_t            - event_id
+    --     payorder_t         - payorder_id
+    --     pay_transfer_t     - transfer_id
+    --
+    -- Секции строятся месячные или годовые в зависимости от объема данных в таблице
+    -- ==============================================================================
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Сформировать ID объекта для POID указанного значения смещения для  
+    -- биллингового периода и значению последовательности,
+    -- p_offset = YYMM.000.000.000
+    -- где YY - год, MM - месяц, 000.000.000 - место для значений счетчика
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Calc_POID(p_offset IN INTEGER, p_sq_nextval IN INTEGER) RETURN INTEGER DETERMINISTIC;
+
+    -- 
+    -- Вычислить смещение для POID, принадлежащему указанному биллинговому периоду 
+    -- формат: YYMM.000.000.000
+    FUNCTION Calc_offset(p_period IN DATE) RETURN INTEGER DETERMINISTIC;
+
+    --
+    -- Извлечь смещение для биллингового периода из POID  
+    -- YYMM.XXX.XXX.XXX -> YYMM.000.000.000
+    FUNCTION Extract_offset(p_poid IN INTEGER) RETURN INTEGER DETERMINISTIC;
+
+    --
+    -- получить нижнюю границу сегмента POID (аналогично Extraxt_offset)
+    -- YYMM.XXX.XXX.XXX -> YYMM.000.000.000
+    --
+    FUNCTION Extract_min_value(p_poid IN INTEGER) RETURN INTEGER DETERMINISTIC;
+    FUNCTION Extract_min_value(p_date IN DATE) RETURN INTEGER DETERMINISTIC;
+    
+    --
+    -- получить верхнюю границу сегмента POID 
+    -- YYMM.XXX.XXX.XXX -> YYMM.999.999.999
+    --
+    FUNCTION Extract_max_value(p_poid IN INTEGER) RETURN INTEGER DETERMINISTIC;
+    FUNCTION Extract_max_value(p_date IN DATE) RETURN INTEGER DETERMINISTIC;
+    --
+    -- Извлечь дату периода из POID  
+    -- YYMM.XXX.XXX.XXX -> DD.MM.YYYY
+    FUNCTION Extract_date(p_poid IN INTEGER) RETURN DATE DETERMINISTIC;
+
+    -- 
+    -- Сформировать ID объекта (POID) для указанного биллингового периода 
+    -- и значению последовательности
+    -- формат POID: YYMM.XXX.XXX.XXX,
+    -- где YY - год, MM - месяц, XXX.XXX.XXX - очередное значение из последовательности 
+    FUNCTION Make_POID(p_period IN DATE, p_sq_nextval IN INTEGER) RETURN INTEGER DETERMINISTIC;
+
+    -- 
+    -- Сформировать ID объекта (POID) для указанного биллингового периода 
+    -- которому принадлежит "p_poid" и значению последовательности
+    -- формат POID: YYMM.XXX.XXX.XXX,
+    -- где YY - год, MM - месяц, XXX.XXX.XXX - очередное значение из последовательности 
+    FUNCTION Clone_POID(p_poid IN INTEGER, p_sq_nextval IN INTEGER) RETURN INTEGER DETERMINISTIC;
+    
+
+    -- ==================================================================== --
+    -- Получить следующий BILL_ID
+    -- ==================================================================== --
+    -- Получить следующий BILL_ID в текущем периоде
+    FUNCTION Bill_id_nextval RETURN INTEGER;
+
+    -- Получить следующий BILL_ID в предыдущем периоде
+    FUNCTION Last_Bill_id_nextval RETURN INTEGER;
+
+    -- Получить следующий BILL_ID в следующем периоде
+    FUNCTION Next_Bill_id_nextval RETURN INTEGER;
+
+    -- ==================================================================== --
+    -- Подчиненные идентификаторы ( период вычисляется по ID родителя)
+    -- ==================================================================== --
+    -- Получить следующий ITEM_ID для счета BILL_ID
+    FUNCTION Bill_Item_id_nextval(p_bill_id IN INTEGER) RETURN INTEGER;
+
+    -- Получить следующий INVOICE_ITEM_ID для счета BILL_ID
+    FUNCTION Bill_Inv_item_id_nextval(p_bill_id IN INTEGER) RETURN INTEGER;
+
+    -- Получить следующий TRANSFER_ID для счета BILL_ID
+    FUNCTION Pay_transfer_id_nextval(p_bill_id IN INTEGER) RETURN INTEGER;
+
+    -- Получить следующий PAYMENT_ID для даты платежа
+    FUNCTION Payment_id_nextval(p_paydate IN DATE) RETURN INTEGER;
+
+    -- Получить следующий EVENT_ID для позиции счета ITEM_ID
+    FUNCTION Item_Event_id_nextval(p_item_id IN INTEGER) RETURN INTEGER;
+
+END PK02_POID;
+/
+CREATE OR REPLACE PACKAGE BODY PK02_POID
+IS
+
+-- ========================================================================= --
+-- Общие правила формирования идентификатора секционированного объекта POID
+-- ========================================================================= --
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Сформировать ID объекта для POID указанного значения смещения для  
+-- биллингового периода и значению последовательности,
+-- p_offset = YYMM.000.000.000
+-- где YY - год, MM - месяц, 000.000.000 - место для значений счетчика
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Calc_POID(p_offset IN INTEGER, p_sq_nextval IN INTEGER) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN p_offset + p_sq_nextval;
+END;
+
+-- 
+-- Вычислить смещение для POID, принадлежащему указанному биллинговому периоду 
+-- формат: YYMM.000.000.000
+-- 
+FUNCTION Calc_offset(p_period IN DATE) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN TO_NUMBER(TO_CHAR(p_period, 'yymm')) * POWER(10,c_Offset);--TO_NUMBER(TO_CHAR(p_period, 'yymm') || '000000000');
+END;
+
+--
+-- получить смещение для биллингового периода, которому принадлежит указанный POID 
+-- YYMM.XXX.XXX.XXX -> YYMM.000.000.000
+--
+FUNCTION Extract_offset(p_poid IN INTEGER) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN TRUNC(p_poid, -1 * c_Offset); --TRUNC(p_poid, -9);
+END;
+
+--
+-- получить нижнюю границу сегмента POID 
+-- YYMM.XXX.XXX.XXX -> YYMM.000.000.000
+--
+FUNCTION Extract_min_value(p_poid IN INTEGER) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN TRUNC(p_poid, -1 * c_Offset); --TRUNC(p_poid, -9);
+END;
+
+FUNCTION Extract_min_value(p_date IN DATE) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN TO_NUMBER(TO_CHAR(p_date,'yymm') * POWER(10,c_Offset)); --TRUNC(p_poid, -9);
+END;
+
+--
+-- получить верхнюю границу сегмента POID 
+-- YYMM.XXX.XXX.XXX -> YYMM.999.999.999
+--
+FUNCTION Extract_max_value(p_poid IN INTEGER) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN TO_NUMBER(SUBSTR(TO_CHAR(p_poid),1,4) || TO_CHAR(POWER(10,c_Offset)-1)); --TRUNC(p_poid, -1*c_Offset) + 999999999;
+END;
+
+
+FUNCTION Extract_max_value(p_date IN DATE) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN TO_NUMBER(TO_CHAR(p_date,'yymm') || TO_CHAR(POWER(10,c_Offset)-1)); --TRUNC(p_poid, -1*c_Offset) + 999999999;
+END;
+
+--
+-- Извлечь дату периода из POID  
+-- YYMM.XXX.XXX.XXX -> YYMM
+--
+FUNCTION Extract_date(p_poid IN INTEGER) RETURN DATE DETERMINISTIC IS
+BEGIN
+    RETURN TO_DATE(SUBSTR(TO_CHAR(p_poid),1,4), 'yymm');
+END;
+
+-- 
+-- Сформировать ID объекта (POID) для указанного биллингового периода 
+-- и значению последовательности
+-- формат POID: YYMM.XXX.XXX.XXX,
+-- где YY - год, MM - месяц, XXX.XXX.XXX - очередное значение из последовательности 
+-- 
+FUNCTION Make_POID(p_period IN DATE, p_sq_nextval IN INTEGER) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN Calc_POID(Calc_offset(p_period), p_sq_nextval);
+END;
+
+-- 
+-- Сформировать ID объекта (POID) для указанного биллингового периода 
+-- которому принадлежит "p_poid" и значению последовательности
+-- формат POID: YYMM.XXX.XXX.XXX,
+-- где YY - год, MM - месяц, XXX.XXX.XXX - очередное значение из последовательности 
+--
+FUNCTION Clone_POID(p_poid IN INTEGER, p_sq_nextval IN INTEGER) RETURN INTEGER DETERMINISTIC IS
+BEGIN
+    RETURN Calc_POID(Extract_offset(p_poid), p_sq_nextval);
+END;
+
+
+-- ==================================================================== --
+-- Получить следующий BILL_ID (в общем это повторение предыдущего раздела)
+-- ==================================================================== --
+-- Получить следующий BILL_ID в текущем биллинговом периоде
+FUNCTION Bill_id_nextval RETURN INTEGER IS
+    v_nextval  INTEGER;
+BEGIN
+    SELECT PERIOD_ID + SQ_BILL_ID.NEXTVAL INTO v_nextval FROM PERIOD_T;
+    RETURN v_nextval;
+END;
+
+-- Получить следующий BILL_ID в предыдущем биллинговом периоде
+FUNCTION Last_Bill_id_nextval RETURN INTEGER IS
+    v_nextval  INTEGER;
+BEGIN
+    SELECT OFFSET_LAST_ID + SQ_BILL_ID.NEXTVAL INTO v_nextval FROM PERIOD_T;
+    RETURN v_nextval;
+END;
+
+-- Получить следующий BILL_ID в следующем биллинговом периоде
+FUNCTION Next_Bill_id_nextval RETURN INTEGER IS
+    v_nextval  INTEGER;
+BEGIN
+    SELECT OFFSET_NEXT_ID + SQ_BILL_ID.NEXTVAL INTO v_nextval FROM PERIOD_T;
+    RETURN v_nextval;
+END;
+
+-- ==================================================================== --
+-- Подчиненные идентификаторы ( период вычисляется по ID родителя)
+-- ==================================================================== --
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Получить следующий ITEM_ID для счета BILL_ID
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+FUNCTION Bill_Item_id_nextval(p_bill_id IN INTEGER) RETURN INTEGER IS
+BEGIN
+    RETURN Clone_POID(p_bill_id, SQ_BILL_ID.NEXTVAL);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Получить следующий INVOICE_ITEM_ID для счета BILL_ID
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+FUNCTION Bill_Inv_item_id_nextval(p_bill_id IN INTEGER) RETURN INTEGER IS
+BEGIN
+    RETURN Clone_POID(p_bill_id, SQ_BILL_ID.NEXTVAL);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Получить следующий TRANSFER_ID для счета BILL_ID
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+FUNCTION Pay_transfer_id_nextval(p_bill_id IN INTEGER) RETURN INTEGER IS
+BEGIN
+    RETURN Clone_POID(p_bill_id, SQ_BILL_ID.NEXTVAL);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Получить следующий PAYMENT_ID для даты платежа
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+FUNCTION Payment_id_nextval(p_paydate IN DATE) RETURN INTEGER IS
+BEGIN
+    RETURN Make_POID(p_paydate, SQ_BILL_ID.NEXTVAL);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+-- Получить следующий EVENT_ID для позиции счета ITEM_ID
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+FUNCTION Item_Event_id_nextval(p_item_id IN INTEGER) RETURN INTEGER IS
+BEGIN
+    RETURN Clone_POID(p_item_id, SQ_EVENT_ID.NEXTVAL);
+END;
+
+
+END PK02_POID;
+/

@@ -1,0 +1,433 @@
+CREATE OR REPLACE PACKAGE PK39_BILLING_DISCOUNT_GUI
+IS
+    -- ==============================================================================
+    c_PkgName   constant varchar2(30) := 'PK39_BILLING_DISCOUNT_GUI';
+    -- ==============================================================================
+    type t_refc is ref cursor;
+    -- Расчет групповых скидок, рачсет ведется после выставления счетов:
+    -- Данные для расчетов в таблицах:
+    -- discount_group_t, dsc_grp_contract_t, dsc_grp_percent_t, dsc_grp_service_t
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Ключ в словаре описывающий 
+    c_KEY_DISCOUNT_RULE CONSTANT INTEGER := PK00_CONST.k_DICT_KEY_DISCOUNT_RULE;
+
+    c_DISC_STD CONSTANT INTEGER := 2501; --'Стандартный расчет скидки по таблице DG_PERCENT_T'
+    c_DISC_MTC CONSTANT INTEGER := 2502; --'Расчет скидки для МТС'
+    c_DISC_BEE CONSTANT INTEGER := 2503; --'Расчет скидки для Билайн', NULL
+    c_DISC_BEE CONSTANT INTEGER := 2504; --'Расчет скидки для Мегафона', NULL
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Создать группу скидок
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Create_group (
+                p_group_name    IN VARCHAR2,
+                p_rule_id       IN INTEGER,
+                p_date_from     IN DATE,
+                p_notes         IN VARCHAR2
+             ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Закрыть группу скидок
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Close_group (
+                p_group_id IN INTEGER,
+                p_date_to  IN DATE
+             );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- добавить лицевой счет в группу
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Add_account(
+                p_group_id   IN INTEGER,
+                p_account_id IN INTEGER,
+                p_date_from  IN DATE
+             ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- добавить заказ в группу
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Add_order(
+                p_dg_account_id  IN INTEGER,
+                p_order_id       IN INTEGER,
+                p_date_from      IN DATE
+             ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Редактировать таблицу процентов скидок
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- получить номер строки
+    FUNCTION Get_next_prc_no(
+                p_group_id  IN INTEGER
+             ) RETURN INTEGER;
+
+    -- Добавить величину
+    PROCEDURE Add_percent(
+                p_group_id  IN NUMBER,
+                p_row_no    IN NUMBER,
+                p_value_min IN NUMBER,
+                p_value_max IN NUMBER,
+                p_percent   IN NUMBER
+             );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Список лицевых счетов в биллинге
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Аccount_list( 
+                   p_recordset    OUT t_refc, 
+                   p_account_no    IN VARCHAR2 -- первые символы номера договора
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Список заказов на лицевых счетах в биллинге
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Order_list( 
+                   p_recordset    OUT t_refc, 
+                   p_account_id    IN INTEGER,
+                   p_order_no      IN VARCHAR2 -- первые символы номера заказа
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Список заказов c канальными услугами на лицевых счетах в биллинге
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Order_channel_list( 
+                   p_recordset  OUT t_refc, 
+                   p_order_no    IN VARCHAR2 -- первые символы номера заказа
+               );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Информация для выборки, пока к сведению
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Info_list( 
+                   p_recordset    OUT t_refc
+               );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Процедура создания компонента услуги идентифицирующего скидку
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Add_discount_to_order (
+                   p_order_id  IN INTEGER,
+                   p_date_from IN DATE,
+                   p_date_to   IN DATE
+               ) RETURN INTEGER;
+    
+    
+END PK39_BILLING_DISCOUNT_GUI;
+/
+CREATE OR REPLACE PACKAGE BODY PK39_BILLING_DISCOUNT_GUI
+IS
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Создать группу скидок
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Create_group (
+            p_group_name    IN VARCHAR2,
+            p_rule_id       IN INTEGER,
+            p_date_from     IN DATE,
+            p_notes         IN VARCHAR2
+         ) RETURN INTEGER
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Create_group';
+    v_group_id  INTEGER;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, group_name = '||p_group_name, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+
+    -- получить ID - для группы скидок
+    SELECT MAX(DG_ID) INTO v_group_id
+      FROM DISCOUNT_GROUP_T;
+    RETURN v_group_id;
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    INSERT INTO DISCOUNT_GROUP_T (
+        DG_ID, DG_NAME, DG_RULE_ID, DATE_FROM, DATE_TO, NOTES
+    )VALUES(
+        v_group_id, p_group_name, p_rule_id, p_date_from, NULL, p_notes
+    );
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    Pk01_Syslog.Write_msg('Stop, group_id = '||v_group_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    RETURN v_group_id;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Закрыть группу скидок
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Close_group (
+            p_group_id IN INTEGER,
+            p_date_to  IN DATE
+         )
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Close_group';
+BEGIN
+    UPDATE DISCOUNT_GROUP_T SET DATE_TO = p_date_to
+     WHERE DG_ID = p_group_id;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR. Group_id='||p_group_id, c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- добавить лицевой счет в группу
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Add_account(
+            p_group_id   IN INTEGER,
+            p_account_id IN INTEGER,
+            p_date_from  IN DATE
+         ) RETURN INTEGER
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Add_account';
+    v_dg_account_id INTEGER;
+BEGIN
+    -- получаем номер строки
+    v_dg_account_id := SQ_DG_ID.NEXTVAL;
+    -- добавляем строку
+    INSERT INTO DG_ACCOUNT_T (DG_ID, DG_ACCOUNT_ID, ACCOUNT_ID, DATE_FROM)
+    VALUES (p_group_id, v_dg_account_id, p_account_id, p_date_from);  
+    -- возвращаем номер строки
+    RETURN v_dg_account_id;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR. Group_id='||p_group_id||', account_id'||p_account_id, c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- добавить заказ в группу
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Add_order(
+            p_dg_account_id  IN INTEGER,
+            p_order_id       IN INTEGER,
+            p_date_from      IN DATE
+         ) RETURN INTEGER
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Add_order';
+    v_dg_order_id INTEGER;
+BEGIN
+    -- получаем номер строки
+    v_dg_order_id := SQ_DG_ID.NEXTVAL;
+    -- добавляем строку
+    INSERT INTO DG_ORDER_T (DG_ACCOUNT_ID, DG_ORDER_ID, ORDER_ID, DATE_FROM)
+    VALUES (p_dg_account_id, v_dg_order_id, p_order_id, p_date_from);  
+    -- возвращаем номер строки
+    RETURN v_dg_order_id;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR. order_id ='||p_order_id, c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Редактировать таблицу процентов скидок
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- получить номер строки
+FUNCTION Get_next_prc_no(
+            p_group_id  IN INTEGER
+         ) RETURN INTEGER
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Get_next_prc_no';
+    v_row_no    INTEGER;
+BEGIN
+    -- получаем номер строки
+    SELECT MAX(ROW_NO) INTO v_row_no
+      FROM DG_PERCENT_T DP
+     WHERE DP.DG_ID = p_group_id;
+    -- возвращаем номер строки
+    RETURN v_row_no;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR. Group_id='||p_group_id, c_PkgName||'.'||v_prcName );
+END;
+
+-- Добавить величину
+PROCEDURE Add_percent(
+            p_group_id  IN NUMBER,
+            p_row_no    IN NUMBER,
+            p_value_min IN NUMBER,
+            p_value_max IN NUMBER,
+            p_percent   IN NUMBER
+         )
+IS
+    v_prcName   CONSTANT VARCHAR2(30) := 'Add_percent';
+BEGIN
+    -- добавляем строку
+    INSERT INTO DG_PERCENT_T (DG_ID, ROW_NO, VALUE_MIN, VALUE_MAX, DISCOUNT_PRC)
+    VALUES (p_group_id, p_row_no, p_value_min, p_value_max, p_percent);  
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR. Group_id='||p_group_id, c_PkgName||'.'||v_prcName );
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Список лицевых счетов в биллинге
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Аccount_list( 
+               p_recordset    OUT t_refc, 
+               p_account_no    IN VARCHAR2 -- первые символы номера договора
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Аccount_list';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+         SELECT ACCOUNT_ID, ACCOUNT_NO, ACCOUNT_TYPE, BILLING_ID
+           FROM ACCOUNT_T
+          WHERE ACCOUNT_NO LIKE p_account_no||'%'
+          ORDER BY ACCOUNT_NO;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Список заказов на лицевых счетах в биллинге
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Order_list( 
+               p_recordset    OUT t_refc, 
+               p_account_id    IN INTEGER,
+               p_order_no      IN VARCHAR2 -- первые символы номера заказа
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Order_list';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+         SELECT O.ORDER_ID, O.ORDER_NO, O.DATE_FROM, O.DATE_TO, S.SERVICE_ID, S.SERVICE
+           FROM ORDER_T O, SERVICE_T S
+          WHERE O.ORDER_NO LIKE p_order_no||'%'
+            AND O.ACCOUNT_ID  = p_account_id
+            AND O.SERVICE_ID = S.SERVICE_ID
+          ORDER BY ORDER_NO;
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Список заказов c канальными услугами на лицевых счетах в биллинге
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Order_channel_list( 
+               p_recordset  OUT t_refc, 
+               p_order_no    IN VARCHAR2 -- первые символы номера заказа
+           )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Order_channel_list';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+      SELECT O.ORDER_ID, O.ORDER_NO, O.DATE_FROM, O.DATE_TO, 
+             S.SERVICE, CI.SPEED_VALUE, CI.SPEED_UNIT_ID, D.NAME
+        FROM ORDER_T O, SERVICE_T S, 
+             ORDER_BODY_T OB, IP_CHANNEL_INFO_T CI, DICTIONARY_T D
+       WHERE O.SERVICE_ID = S.SERVICE_ID
+         AND O.ORDER_ID   = OB.ORDER_ID
+         AND CI.ORDER_BODY_ID = OB.ORDER_BODY_ID
+         AND D.PARENT_ID = Pk00_Const.k_DICT_SPEED_UNIT -- 67
+         AND D.KEY_ID = CI.SPEED_UNIT_ID
+         AND O.ORDER_NO LIKE p_order_no||'%';
+
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Информация для выборки, пока к сведению
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Info_list( 
+               p_recordset    OUT t_refc
+             )
+IS
+    v_prcName    CONSTANT VARCHAR2(30) := 'Info_list';
+    v_retcode    INTEGER;
+BEGIN
+    -- возвращаем курсор
+    OPEN p_recordset FOR
+      SELECT CL.CLIENT_ID,   CL.CLIENT_NAME,
+             CT.CONTRACT_ID, CT.CONTRACT_NO,
+             A.ACCOUNT_ID,   A.ACCOUNT_NO,
+             O.ORDER_ID,     O.ORDER_NO,
+             S.SERVICE_ID,   S.SERVICE,
+             MIN(I.SPEED_STR)
+        FROM ACCOUNT_T A,         -- 40.030
+             ACCOUNT_PROFILE_T AP,-- 40.030
+             CONTRACT_T   CT,     -- 40.030
+             CLIENT_T     CL,     -- 40.030
+             ORDER_T      O,      -- 31.256 / 72.866
+             SERVICE_T    S,
+             ORDER_BODY_T OB,     -- 61.525 / 112.428
+             IP_CHANNEL_INFO_T I  -- 61.525
+       WHERE A.ACCOUNT_TYPE   = 'J'
+         AND A.STATUS         = 'B'
+         AND A.BILLING_ID  IN ( 2001,2002 )
+         AND O.SERVICE_ID NOT IN (1,2,7)  -- 1.240   (кроме голосовой связи МГ/МН/Местн/Зоновой)
+         AND AP.ACCOUNT_ID    = A.ACCOUNT_ID
+         AND AP.DATE_FROM    <= SYSDATE
+         AND (AP.DATE_TO IS NULL OR SYSDATE <= AP.DATE_TO)
+         AND CT.CONTRACT_ID   = AP.CONTRACT_ID
+         AND CL.CLIENT_ID     = CT.CLIENT_ID
+         AND O.ACCOUNT_ID     = A.ACCOUNT_ID
+         AND O.DATE_FROM     <= SYSDATE
+         AND (O.DATE_TO IS NULL OR SYSDATE <= O.DATE_TO)
+         AND O.SERVICE_ID     = S.SERVICE_ID
+         AND OB.ORDER_ID      = O.ORDER_ID
+         AND OB.DATE_FROM    <= SYSDATE
+         AND (OB.DATE_TO IS NULL OR SYSDATE <= OB.DATE_TO)
+         AND OB.ORDER_BODY_ID = I.ORDER_BODY_ID(+)
+       GROUP BY   -- 31.256
+             CL.CLIENT_ID,   CL.CLIENT_NAME,
+             CT.CONTRACT_ID, CT.CONTRACT_NO,
+             A.ACCOUNT_ID,   A.ACCOUNT_NO,
+             O.ORDER_ID,     O.ORDER_NO,
+             S.SERVICE_ID,   S.SERVICE;
+
+EXCEPTION
+    WHEN OTHERS THEN
+        v_retcode := Pk01_SysLog.Fn_write_Error('ERROR', c_PkgName||'.'||v_prcName);
+        IF p_recordset%ISOPEN THEN 
+            CLOSE p_recordset;
+        END IF;
+        RAISE_APPLICATION_ERROR(Pk01_SysLog.n_APP_EXCEPTION, 'msg_id='||v_retcode||':'||c_PkgName||'.'||v_prcName);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Процедура создания компонента услуги идентифицирующего скидку
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Add_discount_to_order (
+               p_order_id  IN INTEGER,
+               p_date_from IN DATE,
+               p_date_to   IN DATE
+           ) RETURN INTEGER
+IS
+    v_prcName       CONSTANT VARCHAR2(30) := 'Add_discount_to_order';
+    v_order_body_id INTEGER;
+    v_subservice_id INTEGER     := Pk00_Const.c_SUBSRV_DISC;
+    v_charge_type   VARCHAR2(3) := Pk00_Const.c_CHARGE_TYPE_DIS;
+BEGIN
+    Pk01_Syslog.Write_msg('Start, order_id = '||p_order_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );  
+    v_order_body_id := Pk02_Poid.Next_order_body_id;
+
+    INSERT INTO ORDER_BODY_T OB (
+        ORDER_BODY_ID, ORDER_ID, SUBSERVICE_ID, CHARGE_TYPE, DATE_FROM, DATE_TO, 
+        CREATE_DATE, MODIFY_DATE
+    ) VALUES (
+        v_order_body_id, p_order_id, v_subservice_id, v_charge_type, p_date_from, p_date_to,
+        SYSDATE, SYSDATE
+    );
+
+    Pk01_Syslog.Write_msg('Stop'||p_order_id, c_PkgName||'.'||v_prcName, Pk01_Syslog.L_info );
+    -- возвращаем номер строки
+    RETURN v_order_body_id;
+EXCEPTION WHEN OTHERS THEN
+    Pk01_Syslog.raise_Exception('ERROR. Order_id='||p_order_id, c_PkgName||'.'||v_prcName );
+END;
+
+
+END PK39_BILLING_DISCOUNT_GUI;
+/
