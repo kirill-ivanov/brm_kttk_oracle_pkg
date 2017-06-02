@@ -84,6 +84,7 @@ IS
           p_account_id     IN INTEGER, -- перенос с л/с
           p_period_id      IN INTEGER, -- переиод с которого начинается новая жизнь
           p_doc_date       IN DATE,    -- дата документов фиксирующих операцию
+          p_oper_date      IN DATE,    -- дата проведения операции
           p_amount         IN NUMBER,  -- сумма операции
           p_notes          IN VARCHAR2,-- примечание к операции
           p_descr          IN VARCHAR2,-- описание операции
@@ -160,6 +161,7 @@ IS
                    p_account_id    IN INTEGER, -- ID лицевого счета
                    p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
                    p_payment_date  IN DATE,    -- дата платежа
+                   p_oper_date     IN DATE,    -- дата проведения операции
                    p_amount        IN NUMBER,  -- сумма платежа
                    p_manager       IN VARCHAR2,
                    p_notes         IN VARCHAR2,-- примечание (номер счета)
@@ -363,14 +365,28 @@ BEGIN
     -- 3) Формируем корректирующий счет при (+) положительном балансе
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     IF v_balance > 0 THEN
-      v_bill_id := Create_adjust_bill_x(
-               p_account_id => p_account_id,
-               p_period_id  => p_period_id,
-               p_bill_date  => p_doc_date,
-               p_bill_total => v_balance,
-               p_notes      => p_notes,
-               p_manager    => p_manager
+      -- на совещании решено использовать только корректировочные платежи 
+      -- заявка № 77113447 от 10.05.2017 С.Бабкина
+      -- {Прошу реализовать списание ДЗ/КЗ в BRM путем внесения фиктивного платежа (поле
+      -- "примечание" - "исключен из ЕГРЮЛ").}
+      --v_bill_id := Create_adjust_bill_x(
+      --         p_account_id => p_account_id,
+      --         p_period_id  => p_period_id,
+      --         p_bill_date  => p_doc_date,
+      --         p_bill_total => v_balance,
+      --         p_notes      => p_notes,
+      --         p_manager    => p_manager
+      --      );
+            
+      v_payment_id := Create_adjust_payment_kz (  
+               p_account_id   => p_account_id, -- ID лицевого счета
+               p_period_id    => p_period_id, -- ID текущего расчетного периода YYYYMM
+               p_payment_date => p_doc_date,    -- дата платежа
+               p_amount       => -v_balance,  -- сумма платежа
+               p_notes        => p_notes,
+               p_manager      => p_manager
             );
+            
     END IF;
     
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
@@ -541,6 +557,7 @@ FUNCTION Oper_vz (
       p_account_id     IN INTEGER, -- перенос с л/с
       p_period_id      IN INTEGER, -- переиод с которого начинается новая жизнь
       p_doc_date       IN DATE,    -- дата документов фиксирующих операцию
+      p_oper_date      IN DATE,    -- дата проведения операции
       p_amount         IN NUMBER,  -- сумма операции
       p_notes          IN VARCHAR2,-- примечание к операции
       p_descr          IN VARCHAR2,-- описание операции
@@ -559,6 +576,7 @@ BEGIN
              p_account_id   => p_account_id, -- ID лицевого счета
              p_period_id    => p_period_id,  -- ID текущего расчетного периода YYYYMM
              p_payment_date => p_doc_date,   -- дата платежа
+             p_oper_date    => p_oper_date,  -- дата проведения операции
              p_amount       => p_amount,     -- сумма платежа
              p_notes        => p_notes,
              p_descr        => p_descr,
@@ -995,6 +1013,7 @@ FUNCTION Create_adjust_payment_vz (
                p_account_id    IN INTEGER, -- ID лицевого счета
                p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
                p_payment_date  IN DATE,    -- дата платежа
+               p_oper_date     IN DATE,    -- дата проведения операции
                p_amount        IN NUMBER,  -- сумма платежа
                p_manager       IN VARCHAR2,
                p_notes         IN VARCHAR2,-- примечание (номер счета)
@@ -1013,19 +1032,22 @@ BEGIN
            )||'_VZ';
 
     -- формируем платеж
-    v_payment_id := PK10_PAYMENT.Add_payment(
-                      p_account_id, 
-                      p_period_id, 
-                      p_payment_date, 
-                      c_vz_payment_type,
-                      p_amount, 
-                      c_vz_paysystem_id,
-                      v_doc_id, 
-                      pk00_const.c_PAY_STATE_OPEN, 
-                      p_manager, 
-                      p_notes,
-                      p_descr
-                   );
+    v_payment_id := PK10_PAYMENT.Add_Payment_With_Oper(
+              p_account_id    => p_account_id,     -- ID лицевого счета клиента
+              p_rep_period_id => p_period_id,      -- ID отчетного периода куда распределен платеж
+              p_payment_datе  => p_payment_date,   -- дата платежа
+              p_payment_type  => c_vz_payment_type,-- тип платежа
+			        p_oper_date		  => p_oper_date,	     -- дата операции - для создания платежа в рамках операций
+              p_recvd         => p_amount,         -- сумма платежа
+              p_paysystem_id  => c_vz_paysystem_id,-- ID платежной системы
+              p_doc_id        => v_doc_id,         -- ID документа в платежной системе
+              p_status        => pk00_const.c_PAY_STATE_OPEN,  -- статус платежа
+              p_manager       => p_manager,        -- Ф.И.О. менеджера распределившего платеж на л/с
+              p_notes         => p_notes,          -- примечание к платежу  
+              p_descr         => p_descr,          -- описание платежа
+			        p_plat_por		  => NULL,             -- номер платежного поручения
+			        p_registry_date	=> NULL  		         -- дата банковского реестра
+          );
                    
 	  RETURN v_payment_id;
 EXCEPTION
@@ -1100,6 +1122,7 @@ BEGIN
              PO.OPER_TOTAL,
              PO.NOTES,
              --
+             ACCS.ACCOUNT_NO        SRC_ACCOUNT_NO,
              PO.SRC_REP_PERIOD_ID   SRC_REP_PERIOD_ID, 
              BS.BILL_TYPE           SRC_BILL_TYPE, 
              BS.BILL_NO             SRC_BILL_NO, 
@@ -1109,6 +1132,7 @@ BEGIN
              PS.PAYMENT_DATE        SRC_PAYMENT_DATE, 
              PSS.PAYSYSTEM_CODE     SRC_PAYSYSTEM, 
              --PS.PAY_DESCR SRC_PAY_DESCR,  
+             ACCD.ACCOUNT_NO        SRC_ACCOUNT_NO,
              PO.DST_REP_PERIOD_ID   DST_REP_PERIOD_ID,
              BD.BILL_TYPE           DST_BILL_TYPE, 
              BD.BILL_NO             DST_BILL_NO,
@@ -1127,7 +1151,9 @@ BEGIN
                 PAYMENT_T PS, 
                 PAYMENT_T PD,
                 PAYSYSTEM_T PSS, 
-                PAYSYSTEM_T PSD
+                PAYSYSTEM_T PSD,
+                account_t accS,
+                account_t accD
        WHERE PO.OPER_TYPE_ID      = PT.OPER_TYPE_ID
          AND PO.SRC_BILL_ID       = BS.BILL_ID(+)
          AND PO.SRC_REP_PERIOD_ID = BS.REP_PERIOD_ID(+)
@@ -1139,8 +1165,10 @@ BEGIN
          AND PO.DST_REP_PERIOD_ID = PD.REP_PERIOD_ID(+)
          AND PSS.PAYSYSTEM_ID(+)  = PS.PAYSYSTEM_ID
          AND PSD.PAYSYSTEM_ID(+)  = PD.PAYSYSTEM_ID
+         AND ACCS.ACCOUNT_ID (+)  = PO.SRC_ACCOUNT_ID 
+         AND ACCD.ACCOUNT_ID (+)  = PO.DST_ACCOUNT_ID
          AND PO.OPER_TYPE_ID      > 10
-         AND PO.DST_REP_PERIOD_ID = p_rep_period_id
+         AND (p_rep_period_id is null or  PO.DST_REP_PERIOD_ID = p_rep_period_id)
          and (p_oper_type_id is null or PO.OPER_TYPE_ID = p_oper_type_id )
       ORDER BY OPER_DATE DESC;
  

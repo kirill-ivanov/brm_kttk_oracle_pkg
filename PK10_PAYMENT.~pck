@@ -53,6 +53,15 @@ IS
                ) RETURN INTEGER;
 
     -- ------------------------------------------------------------------------ --
+    -- Установить валюту платежа 
+    --
+    PROCEDURE Set_currency (
+                  p_rep_period_id   IN INTEGER,   -- ID отчетного периода куда распределен платеж
+                  p_payment_id      IN INTEGER,   -- ID платежа
+                  p_currency_id     IN INTEGER    -- код валюты
+               );
+
+    -- ------------------------------------------------------------------------ --
     -- Добавить корректирующий платеж на Л/С клиента 
     --
     FUNCTION Add_adjust_payment (
@@ -313,17 +322,17 @@ FUNCTION Add_payment (
 IS
     v_prcName     CONSTANT VARCHAR2(30) := 'Add_payment';
     v_payment_id  INTEGER;
-    v_bill_id      INTEGER;
+    v_billing_id  INTEGER;
 BEGIN
     -- проверить биллинг лицевого счета
     SELECT a.billing_id
-      INTO v_bill_id
+      INTO v_billing_id
       FROM ACCOUNT_T a
      WHERE a.account_id = p_account_id;
      
-    IF v_bill_id NOT IN (2003, 2007) THEN
-      Pk01_Syslog.raise_Exception('ERROR billing code', c_PkgName||'.'||v_prcName );
-    END IF;
+--    IF v_billing_id NOT IN (2003, 2007) THEN
+--      Pk01_Syslog.raise_Exception('ERROR billing_id = '||v_bill_id, c_PkgName||'.'||v_prcName );
+--    END IF;
     
     v_payment_id := PK02_POID.Next_payment_id;
     -- cохраняем информацию о платеже
@@ -357,6 +366,28 @@ EXCEPTION
 END;
 
 -- ------------------------------------------------------------------------ --
+-- Установить валюту платежа 
+--
+PROCEDURE Set_currency (
+              p_rep_period_id   IN INTEGER,   -- ID отчетного периода куда распределен платеж
+              p_payment_id      IN INTEGER,   -- ID платежа
+              p_currency_id     IN INTEGER    -- код валюты
+           )
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Add_adjust_payment';
+  	v_payment_id	NUMBER;
+BEGIN
+    --
+    UPDATE PAYMENT_T P
+       SET P.CURRENCY_ID   = p_currency_id
+     WHERE P.REP_PERIOD_ID = p_rep_period_id
+       AND P.PAYMENT_ID    = p_payment_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ------------------------------------------------------------------------ --
 -- Добавить корректирующий платеж на Л/С клиента 
 --
 FUNCTION Add_adjust_payment (
@@ -370,20 +401,21 @@ FUNCTION Add_adjust_payment (
            ) RETURN INTEGER
 IS
     v_prcName     CONSTANT VARCHAR2(30) := 'Add_adjust_payment';
-	v_payment_id	NUMBER;
+  	v_payment_id	NUMBER;
 BEGIN
-	v_payment_id := pk10_payment.Add_payment(
-				p_account_id, 
-              p_rep_period_id, 
-              p_payment_datе, 
-              Pk00_Const.c_PAY_TYPE_ADJUST_BALANCE,
-							-p_amount, 
-              Pk00_Const.c_PAYSYSTEM_CORRECT_ID,
-              p_doc_id, 
-              pk00_const.c_PAY_STATE_OPEN, 
-              p_manager, 
-              p_notes);
-	-- фиксируем операцию корректировки
+    v_payment_id := PK10_PAYMENT.Add_payment(
+                      p_account_id, 
+                      p_rep_period_id, 
+                      p_payment_datе, 
+                      Pk00_Const.c_PAY_TYPE_ADJUST_BALANCE,
+                      -p_amount, 
+                      Pk00_Const.c_PAYSYSTEM_CORRECT_ID,
+                      p_doc_id, 
+                      pk00_const.c_PAY_STATE_OPEN, 
+                      p_manager, 
+                      p_notes
+                   );
+	  -- фиксируем операцию корректировки
     INSERT INTO PAYMENT_OPERATION_T O (
         O.OPER_ID, O.OPER_TYPE_ID, O.OPER_DATE, O.OPER_TOTAL, 
         O.SRC_PAYMENT_ID, O.SRC_REP_PERIOD_ID,
@@ -394,12 +426,11 @@ BEGIN
         v_payment_id, p_rep_period_id, v_payment_id, p_rep_period_id,
         p_manager, p_notes
     );
-	RETURN v_payment_id;
+	  RETURN v_payment_id;
 EXCEPTION
     WHEN OTHERS THEN
         Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
 END;
-
 
 -- ------------------------------------------------------------------------ --
 -- удалить платеж

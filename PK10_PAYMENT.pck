@@ -33,7 +33,57 @@ IS
    
     type t_refc is ref cursor;
     
-    -- ------------------------------------------------------------------------ --
+    
+	-- ------------------------------------------------------------------------ --
+	-- Добавить платеж на Л/С клиента с датой операции
+	-- сумма сразу учитывается в балансе Л/С и учитывается в авнсе, 
+	-- разноска платежа по счетам, выставленным в период платежа или более ранние периоды 
+	-- будет уменьшать аванс.
+	--   - положительное - ID платежного документа (PAYMENT.PAYMENT_ID) в биллинге, 
+	--   - при ошибке выставляет исключение
+	--
+	FUNCTION Add_Payment_With_Oper (
+				  p_account_id      IN INTEGER,   -- ID лицевого счета клиента
+				  p_rep_period_id   IN INTEGER,   -- ID отчетного периода куда распределен платеж
+				  p_payment_datе    IN DATE,      -- дата платежа
+				  p_payment_type    IN VARCHAR2,  -- тип платежа
+				  p_oper_date		IN DATE,	  -- дата операции - для создания платежа в рамках операций
+				  p_recvd           IN NUMBER,    -- сумма платежа
+				  p_paysystem_id    IN INTEGER,   -- ID платежной системы
+				  p_doc_id          IN VARCHAR2,  -- ID документа в платежной системе
+				  p_status          IN VARCHAR2,  -- статус платежа
+				  p_manager         IN VARCHAR2,  -- Ф.И.О. менеджера распределившего платеж на л/с
+				  p_notes           IN VARCHAR2,  -- примечание к платежу  
+				  p_descr           IN VARCHAR2,  -- описание платежа
+				  p_plat_por		in varchar2,  -- номер платежного поручения
+				  p_registry_date	in date		  -- дата банковского реестра
+			   ) RETURN INTEGER;
+
+	-- ------------------------------------------------------------------------ --
+	-- Добавить банковский платеж на Л/С клиента 
+	-- сумма сразу учитывается в балансе Л/С и учитывается в авнсе, 
+	-- разноска платежа по счетам, выставленным в период платежа или более ранние периоды 
+	-- будет уменьшать аванс.
+	--   - положительное - ID платежного документа (PAYMENT.PAYMENT_ID) в биллинге, 
+	--   - при ошибке выставляет исключение
+	--
+	FUNCTION Add_Bank_Payment (
+				  p_account_id      IN INTEGER,   -- ID лицевого счета клиента
+				  p_rep_period_id   IN INTEGER,   -- ID отчетного периода куда распределен платеж
+				  p_payment_datе    IN DATE,      -- дата платежа
+				  p_payment_type    IN VARCHAR2,  -- тип платежа
+				  p_recvd           IN NUMBER,    -- сумма платежа
+				  p_paysystem_id    IN INTEGER,   -- ID платежной системы
+				  p_doc_id          IN VARCHAR2,  -- ID документа в платежной системе
+				  p_status          IN VARCHAR2,  -- статус платежа
+				  p_manager         IN VARCHAR2,  -- Ф.И.О. менеджера распределившего платеж на л/с
+				  p_notes           IN VARCHAR2,  -- примечание к платежу  
+				  p_descr           IN VARCHAR2,  -- описание платежа
+				  p_plat_por		in varchar2,  -- номер платежного поручения
+				  p_registry_date	in date		  -- дата банковского реестра
+			   ) RETURN INTEGER;
+
+	-- ------------------------------------------------------------------------ --
     -- Добавить платеж на Л/С клиента (сумма сразу учитывается в балансе Л/С)
     --   - положительное - ID платежного документа (PAYMENT.PAYMENT_ID) в биллинге, 
     --   - при ошибке выставляет исключение
@@ -343,7 +393,7 @@ BEGIN
         DATE_FROM, DATE_TO,
         PAYSYSTEM_ID, DOC_ID,
         STATUS, STATUS_DATE, CREATE_DATE, LAST_MODIFIED,
-        CREATED_BY, NOTES, Pay_Descr
+        CREATED_BY, NOTES, Pay_Descr, OPER_DATE
     )VALUES(
         v_payment_id, p_rep_period_id, p_payment_type,
         p_payment_datе, p_account_id, p_recvd,
@@ -351,7 +401,147 @@ BEGIN
         NULL, NULL,
         p_paysystem_id, p_doc_id,
         p_status, SYSDATE, SYSDATE, SYSDATE,
-        p_manager, p_notes, p_descr
+        p_manager, p_notes, p_descr, p_payment_datе
+    );
+    -- Изменяем баланс лицевого счета на величину платежа
+    UPDATE ACCOUNT_T
+       SET BALANCE = BALANCE + p_recvd,
+           BALANCE_DATE = p_payment_datе  
+     WHERE ACCOUNT_ID = p_account_id;
+    --
+    RETURN v_payment_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ------------------------------------------------------------------------ --
+-- Добавить платеж на Л/С клиента с датой операции
+-- сумма сразу учитывается в балансе Л/С и учитывается в авнсе, 
+-- разноска платежа по счетам, выставленным в период платежа или более ранние периоды 
+-- будет уменьшать аванс.
+--   - положительное - ID платежного документа (PAYMENT.PAYMENT_ID) в биллинге, 
+--   - при ошибке выставляет исключение
+--
+FUNCTION Add_Payment_With_Oper (
+              p_account_id      IN INTEGER,   -- ID лицевого счета клиента
+              p_rep_period_id   IN INTEGER,   -- ID отчетного периода куда распределен платеж
+              p_payment_datе    IN DATE,      -- дата платежа
+              p_payment_type    IN VARCHAR2,  -- тип платежа
+			        p_oper_date		    IN DATE,	  -- дата операции - для создания платежа в рамках операций
+              p_recvd           IN NUMBER,    -- сумма платежа
+              p_paysystem_id    IN INTEGER,   -- ID платежной системы
+              p_doc_id          IN VARCHAR2,  -- ID документа в платежной системе
+              p_status          IN VARCHAR2,  -- статус платежа
+              p_manager         IN VARCHAR2,  -- Ф.И.О. менеджера распределившего платеж на л/с
+              p_notes           IN VARCHAR2,  -- примечание к платежу  
+              p_descr           IN VARCHAR2,  -- описание платежа
+			        p_plat_por		    IN VARCHAR2,  -- номер платежного поручения
+			        p_registry_date	  IN DATE  		  -- дата банковского реестра
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Add_payment';
+    v_payment_id  INTEGER;
+    v_billing_id  INTEGER;
+BEGIN
+    -- проверить биллинг лицевого счета
+    SELECT a.billing_id
+      INTO v_billing_id
+      FROM ACCOUNT_T a
+     WHERE a.account_id = p_account_id;
+     
+--    IF v_billing_id NOT IN (2003, 2007) THEN
+--      Pk01_Syslog.raise_Exception('ERROR billing_id = '||v_bill_id, c_PkgName||'.'||v_prcName );
+--    END IF;
+    
+    v_payment_id := PK02_POID.Next_payment_id;
+    -- cохраняем информацию о платеже
+    INSERT INTO PAYMENT_T (
+        PAYMENT_ID, REP_PERIOD_ID, PAYMENT_TYPE,
+        PAYMENT_DATE, ACCOUNT_ID, RECVD,
+        ADVANCE, ADVANCE_DATE, BALANCE, TRANSFERED, REFUND,
+        DATE_FROM, DATE_TO,
+        PAYSYSTEM_ID, DOC_ID,
+        STATUS, STATUS_DATE, CREATE_DATE, LAST_MODIFIED,
+        CREATED_BY, NOTES, Pay_Descr, Plat_Por, Registry_Date, OPER_DATE
+    )VALUES(
+        v_payment_id, p_rep_period_id, p_payment_type,
+        p_payment_datе, p_account_id, p_recvd,
+        p_recvd, p_payment_datе, p_recvd, 0, 0,
+        NULL, NULL,
+        p_paysystem_id, p_doc_id,
+        p_status, SYSDATE, SYSDATE, SYSDATE,
+        p_manager, p_notes, p_descr, p_plat_por, p_registry_date, p_oper_date
+    );
+    -- Изменяем баланс лицевого счета на величину платежа
+    UPDATE ACCOUNT_T
+       SET BALANCE = BALANCE + p_recvd,
+           BALANCE_DATE = p_payment_datе  
+     WHERE ACCOUNT_ID = p_account_id;
+    --
+    RETURN v_payment_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+-- ------------------------------------------------------------------------ --
+-- Добавить банковский платеж на Л/С клиента 
+-- сумма сразу учитывается в балансе Л/С и учитывается в авнсе, 
+-- разноска платежа по счетам, выставленным в период платежа или более ранние периоды 
+-- будет уменьшать аванс.
+--   - положительное - ID платежного документа (PAYMENT.PAYMENT_ID) в биллинге, 
+--   - при ошибке выставляет исключение
+--
+FUNCTION Add_Bank_Payment (
+              p_account_id      IN INTEGER,   -- ID лицевого счета клиента
+              p_rep_period_id   IN INTEGER,   -- ID отчетного периода куда распределен платеж
+              p_payment_datе    IN DATE,      -- дата платежа
+              p_payment_type    IN VARCHAR2,  -- тип платежа
+              p_recvd           IN NUMBER,    -- сумма платежа
+              p_paysystem_id    IN INTEGER,   -- ID платежной системы
+              p_doc_id          IN VARCHAR2,  -- ID документа в платежной системе
+              p_status          IN VARCHAR2,  -- статус платежа
+              p_manager         IN VARCHAR2,  -- Ф.И.О. менеджера распределившего платеж на л/с
+              p_notes           IN VARCHAR2,  -- примечание к платежу  
+              p_descr           IN VARCHAR2,  -- описание платежа
+			  p_plat_por		in varchar2,  -- номер платежного поручения
+			  p_registry_date	in date		  -- дата банковского реестра
+           ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Add_payment';
+    v_payment_id  INTEGER;
+    v_billing_id  INTEGER;
+BEGIN
+    -- проверить биллинг лицевого счета
+    SELECT a.billing_id
+      INTO v_billing_id
+      FROM ACCOUNT_T a
+     WHERE a.account_id = p_account_id;
+     
+--    IF v_billing_id NOT IN (2003, 2007) THEN
+--      Pk01_Syslog.raise_Exception('ERROR billing_id = '||v_bill_id, c_PkgName||'.'||v_prcName );
+--    END IF;
+    
+    v_payment_id := PK02_POID.Next_payment_id;
+    -- cохраняем информацию о платеже
+    INSERT INTO PAYMENT_T (
+        PAYMENT_ID, REP_PERIOD_ID, PAYMENT_TYPE,
+        PAYMENT_DATE, ACCOUNT_ID, RECVD,
+        ADVANCE, ADVANCE_DATE, BALANCE, TRANSFERED, REFUND,
+        DATE_FROM, DATE_TO,
+        PAYSYSTEM_ID, DOC_ID,
+        STATUS, STATUS_DATE, CREATE_DATE, LAST_MODIFIED,
+        CREATED_BY, NOTES, Pay_Descr, Plat_Por, Registry_Date
+    )VALUES(
+        v_payment_id, p_rep_period_id, p_payment_type,
+        p_payment_datе, p_account_id, p_recvd,
+        p_recvd, p_payment_datе, p_recvd, 0, 0,
+        NULL, NULL,
+        p_paysystem_id, p_doc_id,
+        p_status, SYSDATE, SYSDATE, SYSDATE,
+        p_manager, p_notes, p_descr, p_plat_por, p_registry_date
     );
     -- Изменяем баланс лицевого счета на величину платежа
     UPDATE ACCOUNT_T

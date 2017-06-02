@@ -13,18 +13,32 @@ IS
     type t_refc is ref cursor;
 
     -- словарь данных DICTIONARY_T:
-    k_dict_balance_operation CONSTANT INTEGER := 33; -- операции с балансами (ДЗ/КЗ)
-    c_op_bl_move         CONSTANT INTEGER := 3301;  -- Операция по переносу остатков ДЗ/КЗ(баланса)
-    c_op_bl_reset        CONSTANT INTEGER := 3302;  -- Операция по списанию ДЗ/КЗ(баланса)
-    c_op_bl_recovery     CONSTANT INTEGER := 3303;  -- Операция по восстановлению ДЗ/КЗ(баланса)
-    c_op_bl_vz           CONSTANT INTEGER := 3304;  -- Оперерация по фиксации взаиморасчетов
+    k_dict_balance_oper  CONSTANT INTEGER := 33;   -- операции с балансами (ДЗ/КЗ)
+    c_op_bl_move         CONSTANT INTEGER := 3301; -- Операция по переносу остатков ДЗ/КЗ(баланса)
+    c_op_bl_reset        CONSTANT INTEGER := 3302; -- Операция по списанию ДЗ/КЗ(баланса)
+    c_op_bl_recovery     CONSTANT INTEGER := 3303; -- Операция по восстановлению ДЗ/КЗ(баланса)
+    c_op_bl_vz           CONSTANT INTEGER := 3304; -- Оперерация по фиксации взаиморасчетов
+    c_op_bl_adjust       CONSTANT INTEGER := 3305; -- Корректировка входящего сальдо из ЕИСУП
 
-    k_dict_bill_type     CONSTANT INTEGER := 3;   -- типы счетов
-    c_bill_type_x        CONSTANT CHAR    := 'X'; -- корректировка баланса (дебет)
+    k_dict_bill_type     CONSTANT INTEGER := 3;    -- типы счетов в слловаре
+    c_bill_type_x        CONSTANT CHAR    := 'X';  -- корректировка баланса (дебет)
 
-    k_dict_bill_type     CONSTANT INTEGER := 62; -- типы платежей
-    c_paymant_type       CONSTANT VARCHAR2(20) := Pk00_Const.c_PAY_TYPE_ADJUST_BALANCE; 
-    c_paysystem_id       CONSTANT INTEGER := Pk00_Const.c_PAYSYSTEM_CORRECT_ID;
+    k_dict_pay_type      CONSTANT INTEGER := 62;   -- типы платежей в слловаре
+
+    -- Взаиморасчеты:
+    c_vz_paysystem_id    CONSTANT INTEGER := 51;   -- платежная система для взаиморасчетов (PAYSYSTEM_T)
+    k_dict_vz_payment    CONSTANT INTEGER := 6208; -- взаиморасчеты в словаре
+    c_vz_payment_type    CONSTANT VARCHAR2(20) := 'AVZT'; 
+
+    -- Операции коректировки ДЗ/КЗ:
+    c_kz_paysystem_id    CONSTANT INTEGER := 52;   -- платежная система корректировок ДЗ/КЗ (PAYSYSTEM_T)
+    k_dict_kz_payment    CONSTANT INTEGER := 6209; -- кредиторская задолженность в словаре
+    c_kz_payment_type    CONSTANT VARCHAR2(20) := 'KZ'; -- кредиторская задолженность
+        
+    -- Корректировка входящего сальдо из ЕИСУП
+    c_1c_paysystem_id    CONSTANT INTEGER := 53;   -- платежная система корректировок из ЕИСУП (PAYSYSTEM_T)
+    k_dict_1c_payment    CONSTANT INTEGER := 6210; -- корректировка из ЕИСУП
+    c_1c_payment_type    CONSTANT VARCHAR2(20) := 'EISUP'; -- корректировка из ЕИСУП
     
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     -- Операция по переносу остатков ДЗ/КЗ(баланса) с одного контрагента 
@@ -72,8 +86,36 @@ IS
           p_doc_date       IN DATE,    -- дата документов фиксирующих операцию
           p_amount         IN NUMBER,  -- сумма операции
           p_notes          IN VARCHAR2,-- примечание к операции
+          p_descr          IN VARCHAR2,-- описание операции
           p_manager        IN VARCHAR2 -- сотрудник проводивший операцию
       ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Удаление платежа иммитирующего взаиморасчеты
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Delete_Oper_vz (
+          p_oper_id        IN INTEGER  -- id удаляемой операции 
+      );
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Операция для проведения корректировки баланса из ЕИСУП
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    FUNCTION Oper_1c (
+          p_account_id     IN INTEGER, -- перенос с л/с
+          p_period_id      IN INTEGER, -- переиод с которого начинается новая жизнь
+          p_doc_date       IN DATE,    -- дата документов фиксирующих операцию
+          p_amount         IN NUMBER,  -- сумма операции
+          p_descr          IN VARCHAR2,-- описание операции
+          p_manager        IN VARCHAR2 -- сотрудник проводивший операцию
+      ) RETURN INTEGER;
+
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- Удаление операции для проведения корректировки баланса из ЕИСУП
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    PROCEDURE Delete_Oper_1c (
+          p_oper_id        IN INTEGER  -- id удаляемой операции 
+      );
+
 
     -- ============================================================= --
     -- Служебные процедуры
@@ -98,15 +140,42 @@ IS
                 ) RETURN INTEGER;
         
     -- ------------------------------------------------------------- --
-    -- создать платеж для корректировки баланса
+    -- создать платеж для корректировки баланса 
+    -- для корректировки кредиторской задолженности
     -- ------------------------------------------------------------- --
-    FUNCTION Create_adjust_payment (  
+    FUNCTION Create_adjust_payment_kz (  
                    p_account_id    IN INTEGER, -- ID лицевого счета
                    p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
                    p_payment_date  IN DATE,    -- дата платежа
                    p_amount        IN NUMBER,  -- сумма платежа
                    p_manager       IN VARCHAR2,
-                   p_notes         IN VARCHAR2,
+                   p_notes         IN VARCHAR2,-- примечание (номер счета)
+                   p_descr         IN VARCHAR2 DEFAULT NULL -- описание платежа (исх. документ)
+                ) RETURN INTEGER;
+
+    -- ------------------------------------------------------------- --
+    -- создать платеж для проведения взаиморасчетов 
+    -- ------------------------------------------------------------- --
+    FUNCTION Create_adjust_payment_vz (  
+                   p_account_id    IN INTEGER, -- ID лицевого счета
+                   p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
+                   p_payment_date  IN DATE,    -- дата платежа
+                   p_amount        IN NUMBER,  -- сумма платежа
+                   p_manager       IN VARCHAR2,
+                   p_notes         IN VARCHAR2,-- примечание (номер счета)
+                   p_descr         IN VARCHAR2 DEFAULT NULL -- описание платежа (исх. документ)
+                ) RETURN INTEGER;
+
+    -- ------------------------------------------------------------- --
+    -- создать платеж для проведения корректировки баланса из ЕИСУП 
+    -- ------------------------------------------------------------- --
+    FUNCTION Create_adjust_payment_1c (  
+                   p_account_id    IN INTEGER, -- ID лицевого счета
+                   p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
+                   p_payment_date  IN DATE,    -- дата платежа
+                   p_amount        IN NUMBER,  -- сумма платежа
+                   p_manager       IN VARCHAR2,
+                   p_notes         IN VARCHAR2,-- примечание (номер счета)
                    p_descr         IN VARCHAR2 DEFAULT NULL -- описание платежа (исх. документ)
                 ) RETURN INTEGER;
 
@@ -115,8 +184,17 @@ IS
     -- ------------------------------------------------------------- --
     PROCEDURE Balance_oper_list( 
                    p_recordset    OUT t_refc, 
-                   p_rep_period_id IN INTEGER    -- ID периода счета
+                   p_rep_period_id IN INTEGER,    -- ID периода счета
+                   p_oper_type_id  in number
                );
+
+    -- ------------------------------------------------------------- --
+    -- найти ID лицевого счета по номеру( используется в GUI )
+    -- ------------------------------------------------------------- --
+    FUNCTION get_account_id (
+          p_account_no     IN VARCHAR2 -- л/с
+      ) RETURN INTEGER;
+
 
 END PK10_BALANCE_OPERATION;
 /
@@ -167,7 +245,7 @@ BEGIN
     -- 3) Источгик: формируем корректирующий платеж при (-)отрицательном балансе
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     IF v_balance < 0 THEN
-      v_src_payment_id := Create_adjust_payment (  
+      v_src_payment_id := Create_adjust_payment_kz (  
                p_account_id   => p_src_account_id,
                p_period_id    => p_period_id,
                p_payment_date => p_doc_date,
@@ -195,7 +273,7 @@ BEGIN
     -- 5) Назначение: формируем корректирующий платеж при (+)положтиельном балансе
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     IF v_balance < 0 THEN
-      v_dst_payment_id := Create_adjust_payment (  
+      v_dst_payment_id := Create_adjust_payment_kz (  
                p_account_id   => p_dst_account_id,
                p_period_id    => p_period_id,
                p_payment_date => p_doc_date,
@@ -210,22 +288,37 @@ BEGIN
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     v_oper_id := Pk02_Poid.Next_operation_id;
     --
-    INSERT INTO ACCOUNT_OPERATION_T (
-      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL,
-      SRC_ACCOUNT_ID, SRC_REP_PERIOD_ID, SRC_BILL_ID, SRC_PAYMENT_ID,
-      DST_ACCOUNT_ID, DST_REP_PERIOD_ID, DST_BILL_ID, DST_PAYMENT_ID,
-      CREATED_BY, NOTES
+    INSERT INTO PAYMENT_OPERATION_T(
+      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL, 
+      SRC_PAYMENT_ID, SRC_REP_PERIOD_ID, 
+      DST_PAYMENT_ID, DST_REP_PERIOD_ID, 
+      CREATED_BY, NOTES, 
+      SRC_ACCOUNT_ID, DST_ACCOUNT_ID, 
+      SRC_BILL_ID, DST_BILL_ID
     )VALUES(
-      v_oper_id, c_op_bl_recovery, SYSDATE, v_balance,
-      p_src_account_id, p_period_id, v_src_bill_id, v_src_payment_id,
-      p_dst_account_id, p_period_id, v_dst_bill_id, v_dst_payment_id, 
-      p_manager, p_notes
+      v_oper_id, c_op_bl_move, SYSDATE, v_balance,
+      v_src_payment_id, p_period_id,
+      v_dst_payment_id, p_period_id,
+      p_manager, p_notes,
+      p_src_account_id, p_src_account_id,
+      v_src_bill_id, v_dst_bill_id
     );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 7) Пересчет и получение баланса л/с источника
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(p_src_account_id);
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 8) Пересчет и получение баланса л/с приемника
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(p_dst_account_id);
     
     RETURN v_oper_id;
 EXCEPTION
     WHEN OTHERS THEN
-        RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        --RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
 END;
     
 -- ------------------------------------------------------------- --
@@ -262,28 +355,43 @@ BEGIN
      WHERE A.ACCOUNT_ID = p_account_id;
      
     IF v_bal_date > p_doc_date THEN
-      RETURN -Pk01_Syslog.Fn_write_msg('Ошибка, позже момента списания было движение средств', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_err);
+      --RETURN -Pk01_Syslog.Fn_write_msg('Ошибка, позже момента списания было движение средств', c_PkgName||'.'||v_prcName, Pk01_Syslog.L_err);
+      raise_application_error(-20001,'Ошибка, позже момента списания было движение средств');
     END IF;
    
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     -- 3) Формируем корректирующий счет при (+) положительном балансе
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     IF v_balance > 0 THEN
-      v_bill_id := Create_adjust_bill_x(
-               p_account_id => p_account_id,
-               p_period_id  => p_period_id,
-               p_bill_date  => p_doc_date,
-               p_bill_total => v_balance,
-               p_notes      => p_notes,
-               p_manager    => p_manager
+      -- на совещании решено использовать только корректировочные платежи 
+      -- заявка № 77113447 от 10.05.2017 С.Бабкина
+      -- {Прошу реализовать списание ДЗ/КЗ в BRM путем внесения фиктивного платежа (поле
+      -- "примечание" - "исключен из ЕГРЮЛ").}
+      --v_bill_id := Create_adjust_bill_x(
+      --         p_account_id => p_account_id,
+      --         p_period_id  => p_period_id,
+      --         p_bill_date  => p_doc_date,
+      --         p_bill_total => v_balance,
+      --         p_notes      => p_notes,
+      --         p_manager    => p_manager
+      --      );
+            
+      v_payment_id := Create_adjust_payment_kz (  
+               p_account_id   => p_account_id, -- ID лицевого счета
+               p_period_id    => p_period_id, -- ID текущего расчетного периода YYYYMM
+               p_payment_date => p_doc_date,    -- дата платежа
+               p_amount       => -v_balance,  -- сумма платежа
+               p_notes        => p_notes,
+               p_manager      => p_manager
             );
+            
     END IF;
     
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     -- 4) Формируем корректирующий платеж при отрицательном балансе
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     IF v_balance < 0 THEN
-      v_payment_id := Create_adjust_payment (  
+      v_payment_id := Create_adjust_payment_kz (  
                p_account_id   => p_account_id, -- ID лицевого счета
                p_period_id    => p_period_id, -- ID текущего расчетного периода YYYYMM
                p_payment_date => p_doc_date,    -- дата платежа
@@ -298,22 +406,32 @@ BEGIN
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     v_oper_id := Pk02_Poid.Next_operation_id;
     --
-    INSERT INTO ACCOUNT_OPERATION_T (
-      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL,
-      SRC_ACCOUNT_ID, SRC_REP_PERIOD_ID, SRC_BILL_ID, SRC_PAYMENT_ID,
-      DST_ACCOUNT_ID, DST_REP_PERIOD_ID, DST_BILL_ID, DST_PAYMENT_ID,
-      CREATED_BY, NOTES
+    INSERT INTO PAYMENT_OPERATION_T(
+      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL, 
+      SRC_PAYMENT_ID, SRC_REP_PERIOD_ID, 
+      DST_PAYMENT_ID, DST_REP_PERIOD_ID, 
+      CREATED_BY, NOTES, 
+      SRC_ACCOUNT_ID, DST_ACCOUNT_ID, 
+      SRC_BILL_ID, DST_BILL_ID
     )VALUES(
       v_oper_id, c_op_bl_reset, SYSDATE, v_balance,
-      p_account_id, p_period_id, NULL, NULL,
-      p_account_id, p_period_id, v_bill_id, v_payment_id, 
-      p_manager, p_notes
+      NULL, p_period_id,
+      v_payment_id, p_period_id,
+      p_manager, p_notes,
+      p_account_id, p_account_id,
+      NULL, v_bill_id
     );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 6) На всякий случай пересчитываем баланс и получаем величину задолженности
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(p_account_id);
     
     RETURN v_oper_id;
 EXCEPTION
     WHEN OTHERS THEN
-        RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        --RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
 END;
     
 -- ------------------------------------------------------------- --
@@ -331,6 +449,7 @@ IS
     v_prcName        CONSTANT VARCHAR2(30) := 'Oper_recovery';
     v_oper_id        INTEGER;
     v_total          NUMBER;
+    v_balance        NUMBER;
     v_src_period_id  INTEGER := NULL;
     v_src_bill_id    INTEGER := NULL;
     v_dst_bill_id    INTEGER := NULL;
@@ -355,7 +474,7 @@ BEGIN
        WHERE B.BILL_ID = v_src_bill_id;
        
       -- формируем корректирующий платеж
-      v_dst_payment_id := Create_adjust_payment (  
+      v_dst_payment_id := Create_adjust_payment_kz (  
                p_account_id   => p_account_id, -- ID лицевого счета
                p_period_id    => p_period_id,  -- ID текущего расчетного периода YYYYMM
                p_payment_date => p_doc_date,   -- дата платежа
@@ -399,22 +518,32 @@ BEGIN
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     v_oper_id := Pk02_Poid.Next_operation_id;
     --
-    INSERT INTO ACCOUNT_OPERATION_T (
-      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL,
-      SRC_ACCOUNT_ID, SRC_REP_PERIOD_ID, SRC_BILL_ID, SRC_PAYMENT_ID,
-      DST_ACCOUNT_ID, DST_REP_PERIOD_ID, DST_BILL_ID, DST_PAYMENT_ID,
-      CREATED_BY, NOTES
+    INSERT INTO PAYMENT_OPERATION_T(
+      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL, 
+      SRC_PAYMENT_ID, SRC_REP_PERIOD_ID, 
+      DST_PAYMENT_ID, DST_REP_PERIOD_ID, 
+      CREATED_BY, NOTES, 
+      SRC_ACCOUNT_ID, DST_ACCOUNT_ID, 
+      SRC_BILL_ID, DST_BILL_ID
     )VALUES(
       v_oper_id, c_op_bl_recovery, SYSDATE, v_total,
-      p_account_id, v_src_period_id, v_src_bill_id, v_src_payment_id,
-      p_account_id, p_period_id, v_dst_bill_id, v_dst_payment_id, 
-      p_manager, p_notes
+      v_src_payment_id, v_src_period_id,
+      v_dst_payment_id, p_period_id,
+      p_manager, p_notes,
+      p_account_id, p_account_id,
+      v_src_bill_id, v_dst_bill_id
     );
+    
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 6) На всякий случай пересчитываем баланс и получаем величину задолженности
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(p_account_id);
     
     RETURN v_oper_id;
 EXCEPTION
     WHEN OTHERS THEN
-        RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        --RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
 END;
 
 -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
@@ -435,11 +564,12 @@ IS
     v_prcName        CONSTANT VARCHAR2(30) := 'Oper_vz';
     v_oper_id        INTEGER;
     v_dst_payment_id INTEGER;
+    v_balance        NUMBER;
 BEGIN
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     -- формируем корректировочный платеж для отражения взаиморасчетов
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
-    v_dst_payment_id := Create_adjust_payment (  
+    v_dst_payment_id := Create_adjust_payment_vz (  
              p_account_id   => p_account_id, -- ID лицевого счета
              p_period_id    => p_period_id,  -- ID текущего расчетного периода YYYYMM
              p_payment_date => p_doc_date,   -- дата платежа
@@ -448,30 +578,240 @@ BEGIN
              p_descr        => p_descr,
              p_manager      => p_manager
           );
-               
+          
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     -- 5) формирование отчета о проведенной операции
     -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
     v_oper_id := Pk02_Poid.Next_operation_id;
     --
-    INSERT INTO ACCOUNT_OPERATION_T (
-      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL,
-      SRC_ACCOUNT_ID, SRC_REP_PERIOD_ID, SRC_BILL_ID, SRC_PAYMENT_ID,
-      DST_ACCOUNT_ID, DST_REP_PERIOD_ID, DST_BILL_ID, DST_PAYMENT_ID,
-      CREATED_BY, NOTES
+    INSERT INTO PAYMENT_OPERATION_T(
+      OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL, 
+      SRC_PAYMENT_ID, SRC_REP_PERIOD_ID, 
+      DST_PAYMENT_ID, DST_REP_PERIOD_ID, 
+      CREATED_BY, NOTES, 
+      SRC_ACCOUNT_ID, DST_ACCOUNT_ID, 
+      SRC_BILL_ID, DST_BILL_ID
     )VALUES(
       v_oper_id, c_op_bl_vz, SYSDATE, p_amount,
-      p_account_id, NULL, NULL, NULL,
-      p_account_id, p_period_id, NULL, v_dst_payment_id, 
-      p_manager, p_notes
+      NULL, p_period_id,
+      v_dst_payment_id, p_period_id,
+      p_manager, p_notes,
+      p_account_id, p_account_id,
+      NULL, NULL
     );
-    --
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    -- 6) На всякий случай пересчитываем баланс и получаем величину задолженности
+    -- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(p_account_id);
+    
     RETURN v_oper_id;
 EXCEPTION
     WHEN OTHERS THEN
-        RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        --RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
 END;  
 
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Удаление платежа иммитирующего взаиморасчеты
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Delete_Oper_vz (
+      p_oper_id        IN INTEGER  -- id удаляемой операции 
+  )
+IS
+    v_prcName        CONSTANT VARCHAR2(30) := 'Delete_Oper_vz';
+    v_oper_id        INTEGER;
+    v_account_id     INTEGER;
+    v_dst_payment_id INTEGER;
+    v_dst_bill_id    INTEGER;
+    v_period_id      INTEGER;
+    v_retcode        INTEGER;
+    v_balance        NUMBER;
+BEGIN
+    -- получаем информацию об операции
+    SELECT PO.DST_REP_PERIOD_ID, 
+           PO.DST_PAYMENT_ID, PO.DST_BILL_ID, PO.DST_ACCOUNT_ID
+      INTO v_period_id, v_dst_payment_id, v_dst_bill_id, v_account_id 
+      FROM PAYMENT_OPERATION_T PO
+     WHERE PO.OPER_ID = p_oper_id;
+
+    -- Удаляем запись об операции
+    DELETE FROM PAYMENT_OPERATION_T PO
+     WHERE PO.OPER_ID = p_oper_id;
+    
+    -- Корректирующий платеж:
+    IF v_dst_payment_id IS NOT NULL THEN
+      -- удаляем всю цепочку разноски платежа
+      PK10_PAYMENTS_TRANSFER.Delete_transfer_chain (
+               p_pay_period_id => v_period_id,
+               p_payment_id    => v_dst_payment_id
+           );
+      -- удаляем корректирующий платеж
+      DELETE FROM PAYMENT_T P 
+       WHERE P.REP_PERIOD_ID = v_period_id
+         AND P.PAYMENT_ID    = v_dst_payment_id;
+
+    END IF;    
+
+    -- пересчитываем баланс после отмены операции
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(v_account_id);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Операция для проведения корректировки баланса из ЕИСУП
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+FUNCTION Oper_1c (
+      p_account_id     IN INTEGER, -- л/с
+      p_period_id      IN INTEGER, -- переиод 
+      p_doc_date       IN DATE,    -- дата документа
+      p_amount         IN NUMBER,  -- сумма операции (+ увеличить баланс  - уменьшить баланс)
+      p_descr          IN VARCHAR2,-- описание операции
+      p_manager        IN VARCHAR2 -- сотрудник проводивший операцию
+  ) RETURN INTEGER
+IS
+    v_prcName        CONSTANT VARCHAR2(30) := 'Oper_1с';
+    v_oper_id        INTEGER := NULL;
+    v_dst_payment_id INTEGER;
+    v_dst_bill_id    INTEGER;
+    v_balance        NUMBER;
+BEGIN
+    -- при положительной сумме операции формируем корректирующий платеж
+    IF p_amount > 0 THEN
+        v_dst_payment_id := Create_adjust_payment_1c (  
+               p_account_id   => p_account_id, -- ID лицевого счета
+               p_period_id    => p_period_id,  -- ID текущего расчетного периода YYYYMM
+               p_payment_date => p_doc_date,   -- дата платежа
+               p_amount       => p_amount,     -- сумма платежа
+               p_notes        => p_descr,
+               p_descr        => p_descr,
+               p_manager      => p_manager
+            );
+    -- при отрицательной сумме операции формируем корректирующий счет
+    ELSIF p_amount < 0 THEN
+        v_dst_bill_id := Create_adjust_bill_x(
+               p_account_id => p_account_id,
+               p_period_id  => p_period_id,
+               p_bill_date  => p_doc_date,
+               p_bill_total => -p_amount,
+               p_notes      => p_descr,
+               p_manager    => p_manager
+            );
+    END IF;
+    -- фиксируем проведение операции
+    IF p_amount != 0 THEN
+        v_oper_id := Pk02_Poid.Next_operation_id;
+        --
+        INSERT INTO PAYMENT_OPERATION_T(
+          OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL, 
+          SRC_PAYMENT_ID, SRC_REP_PERIOD_ID, 
+          DST_PAYMENT_ID, DST_REP_PERIOD_ID, 
+          CREATED_BY, NOTES, 
+          SRC_ACCOUNT_ID, DST_ACCOUNT_ID, 
+          SRC_BILL_ID, DST_BILL_ID
+        )VALUES(
+          v_oper_id, c_op_bl_adjust, SYSDATE, p_amount,
+          NULL, p_period_id,
+          v_dst_payment_id, p_period_id,
+          p_manager, p_descr,
+          p_account_id, p_account_id,
+          NULL, v_dst_bill_id
+        );
+        
+        -- На всякий случай пересчитываем баланс и получаем величину задолженности
+        v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(p_account_id);
+        
+    END IF;
+    
+    RETURN v_oper_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        --RETURN -Pk01_Syslog.Fn_write_error('ERROR', c_PkgName||'.'||v_prcName );
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- найти ID лицевого счета по номеру
+-- используется в GUI
+FUNCTION get_account_id (
+      p_account_no     IN VARCHAR2 -- л/с
+  ) RETURN INTEGER
+IS
+  v_account_id INTEGER;
+BEGIN
+    SELECT ACCOUNT_ID
+      INTO v_account_id 
+      FROM ACCOUNT_T A 
+     WHERE A.ACCOUNT_NO = p_account_no;
+    RETURN v_account_id; 
+EXCEPTION 
+    WHEN NO_DATA_FOUND THEN
+        RAISE_APPLICATION_ERROR(-20001,'Не найден л/с '||p_account_no);
+END;
+
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+-- Удаление операции для проведения корректировки баланса из ЕИСУП
+-- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - --
+PROCEDURE Delete_Oper_1c (
+      p_oper_id        IN INTEGER  -- id удаляемой операции 
+  )
+IS
+    v_prcName        CONSTANT VARCHAR2(30) := 'Delete_Oper_1с';
+    v_oper_id        INTEGER;
+    v_account_id     INTEGER;
+    v_dst_payment_id INTEGER;
+    v_dst_bill_id    INTEGER;
+    v_period_id      INTEGER;
+    v_retcode        INTEGER;
+    v_balance        NUMBER;
+BEGIN
+    -- получаем информацию об операции
+    SELECT PO.DST_REP_PERIOD_ID, PO.DST_PAYMENT_ID, PO.DST_BILL_ID, PO.DST_ACCOUNT_ID
+      INTO v_period_id, v_dst_payment_id, v_dst_bill_id, v_account_id
+      FROM PAYMENT_OPERATION_T PO
+     WHERE PO.OPER_ID = p_oper_id;
+
+    -- Удаляем запись об операции
+    DELETE FROM PAYMENT_OPERATION_T PO
+     WHERE PO.OPER_ID = p_oper_id;
+    
+    -- Корректирующий платеж:
+    IF v_dst_payment_id IS NOT NULL THEN
+      -- удаляем всю цепочку разноски платежа
+      PK10_PAYMENTS_TRANSFER.Delete_transfer_chain (
+               p_pay_period_id => v_period_id,
+               p_payment_id    => v_dst_payment_id
+           );
+      -- удаляем корректирующий платеж
+      DELETE FROM PAYMENT_T P 
+       WHERE P.REP_PERIOD_ID = v_period_id
+         AND P.PAYMENT_ID    = v_dst_payment_id;
+    
+    -- Корректирующий счет:
+    ELSIF v_dst_bill_id IS NOT NULL THEN
+      -- удаляем операции разноски на корректирующий счет
+      PK10_PAYMENTS_TRANSFER.Delete_transfer_bill (
+               p_period_id => v_period_id,
+               p_bill_id   => v_dst_bill_id
+           );
+      -- удаляем корректирующий счет
+      v_retcode := Pk07_Bill.Delete_bill(
+              p_bill_id   => v_dst_bill_id,
+              p_period_id => v_period_id,
+              p_force     => 0
+           );
+    END IF;
+
+    -- пересчитываем баланс после отмены операции
+    v_balance := PK05_ACCOUNT_BALANCE.Refresh_balance(v_account_id);
+
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+  
 -- ============================================================= --
 --         В С П О М О Г А Т Е Л Ь Н Ы Е   Ф У Н К Ц И И         --
 -- ============================================================= --
@@ -589,16 +929,16 @@ BEGIN
            BILL_ID, REP_PERIOD_ID, ITEM_ID, ITEM_TYPE,
            ORDER_ID, SERVICE_ID, ORDER_BODY_ID, SUBSERVICE_ID,
            CHARGE_TYPE, ITEM_TOTAL, RECVD, DATE_FROM, DATE_TO,
-           CREATE_DATE, LAST_MODIFIED, TAX_INCL, NOTES
+           CREATE_DATE, LAST_MODIFIED, TAX_INCL, NOTES, ITEM_CURRENCY_ID
     )
     SELECT * 
       FROM (
         SELECT I.BILL_ID, I.REP_PERIOD_ID, v_item_id ITEM_ID, 'A' ITEM_TYPE,
-               I.ORDER_ID, I.SERVICE_ID, ORDER_BODY_ID, I.SUBSERVICE_ID,
+               I.ORDER_ID, I.SERVICE_ID, I.ORDER_BODY_ID, I.SUBSERVICE_ID,
                'ONT' CHARGE_TYPE, p_bill_total ITEM_TOTAL, 0 RECVD, 
                TRUNC(p_bill_date, 'mm') DATE_FROM, p_bill_date DATE_TO,
                SYSDATE CREATE_DATE, SYSDATE LAST_MODIFIED, 'Y' TAX_INCL,
-               'корректировка баланса' NOTES
+               'корректировка баланса' NOTES, v_currency_id
           FROM ITEM_T I, BILL_T B
          WHERE I.REP_PERIOD_ID = B.REP_PERIOD_ID
            AND I.BILL_ID       = B.BILL_ID
@@ -617,9 +957,10 @@ EXCEPTION
 END;
 
 -- ------------------------------------------------------------- --
--- создать платеж для корректировки баланса
+-- создать платеж для корректировки баланса 
+-- для корректировки кредиторской задолженности
 -- ------------------------------------------------------------- --
-FUNCTION Create_adjust_payment (  
+FUNCTION Create_adjust_payment_kz (  
                p_account_id    IN INTEGER, -- ID лицевого счета
                p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
                p_payment_date  IN DATE,    -- дата платежа
@@ -629,7 +970,7 @@ FUNCTION Create_adjust_payment (
                p_descr         IN VARCHAR2 DEFAULT NULL -- описание платежа (исх. документ)
             ) RETURN INTEGER
 IS
-    v_prcName     CONSTANT VARCHAR2(30) := 'Create_adjust_payment';
+    v_prcName     CONSTANT VARCHAR2(30) := 'Create_adjust_payment_kz';
   	v_payment_id	NUMBER;
     v_doc_id      PAYMENT_T.DOC_ID%TYPE;
     v_balance     NUMBER;
@@ -638,25 +979,22 @@ BEGIN
     v_doc_id := Pk07_Bill.Next_bill_no (
                p_account_id     => p_account_id,
                p_bill_period_id => p_period_id
-           )||'X';
+           )||'_KZ';
 
     -- формируем платеж
     v_payment_id := PK10_PAYMENT.Add_payment(
                       p_account_id, 
                       p_period_id, 
                       p_payment_date, 
-                      Pk00_Const.c_PAY_TYPE_ADJUST_BALANCE,
+                      c_kz_payment_type,
                       p_amount, 
-                      Pk00_Const.c_PAYSYSTEM_CORRECT_ID,
+                      c_kz_paysystem_id,
                       v_doc_id, 
                       pk00_const.c_PAY_STATE_OPEN, 
                       p_manager, 
                       p_notes,
                       p_descr
                    );
-                   
-    -- пересчет баланса л/с
-    v_balance := Pk05_Account_Balance.Refresh_balance(p_account_id);
                    
 	  RETURN v_payment_id;
 EXCEPTION
@@ -665,11 +1003,102 @@ EXCEPTION
 END;
 
 -- ------------------------------------------------------------- --
+-- создать платеж для проведения взаиморасчетов 
+-- ------------------------------------------------------------- --
+FUNCTION Create_adjust_payment_vz (  
+               p_account_id    IN INTEGER, -- ID лицевого счета
+               p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
+               p_payment_date  IN DATE,    -- дата платежа
+               p_amount        IN NUMBER,  -- сумма платежа
+               p_manager       IN VARCHAR2,
+               p_notes         IN VARCHAR2,-- примечание (номер счета)
+               p_descr         IN VARCHAR2 DEFAULT NULL -- описание платежа (исх. документ)
+            ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Create_adjust_payment_vz';
+  	v_payment_id	NUMBER;
+    v_doc_id      PAYMENT_T.DOC_ID%TYPE;
+    v_balance     NUMBER;
+BEGIN
+    -- doc_id - временно формируем как номер счета
+    v_doc_id := Pk07_Bill.Next_bill_no (
+               p_account_id     => p_account_id,
+               p_bill_period_id => p_period_id
+           )||'_VZ';
+
+    -- формируем платеж
+    v_payment_id := PK10_PAYMENT.Add_payment(
+                      p_account_id, 
+                      p_period_id, 
+                      p_payment_date, 
+                      c_vz_payment_type,
+                      p_amount, 
+                      c_vz_paysystem_id,
+                      v_doc_id, 
+                      pk00_const.c_PAY_STATE_OPEN, 
+                      p_manager, 
+                      p_notes,
+                      p_descr
+                   );
+                   
+	  RETURN v_payment_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;
+
+-- ------------------------------------------------------------- --
+-- создать платеж для проведения корректировки баланса из ЕИСУП 
+-- ------------------------------------------------------------- --
+FUNCTION Create_adjust_payment_1c (  
+               p_account_id    IN INTEGER, -- ID лицевого счета
+               p_period_id     IN INTEGER, -- ID текущего расчетного периода YYYYMM
+               p_payment_date  IN DATE,    -- дата платежа
+               p_amount        IN NUMBER,  -- сумма платежа
+               p_manager       IN VARCHAR2,
+               p_notes         IN VARCHAR2,-- примечание (номер счета)
+               p_descr         IN VARCHAR2 DEFAULT NULL -- описание платежа (исх. документ)
+            ) RETURN INTEGER
+IS
+    v_prcName     CONSTANT VARCHAR2(30) := 'Create_adjust_payment_vz';
+  	v_payment_id	NUMBER;
+    v_doc_id      PAYMENT_T.DOC_ID%TYPE;
+    v_balance     NUMBER;
+BEGIN
+    -- doc_id - временно формируем как номер счета
+    v_doc_id := Pk07_Bill.Next_bill_no (
+               p_account_id     => p_account_id,
+               p_bill_period_id => p_period_id
+           )||'_1C';
+
+    -- формируем платеж
+    v_payment_id := PK10_PAYMENT.Add_payment(
+                      p_account_id, 
+                      p_period_id, 
+                      p_payment_date, 
+                      c_1c_payment_type,
+                      p_amount, 
+                      c_1c_paysystem_id,
+                      v_doc_id, 
+                      pk00_const.c_PAY_STATE_OPEN, 
+                      p_manager, 
+                      p_notes,
+                      p_descr
+                   );
+                   
+	  RETURN v_payment_id;
+EXCEPTION
+    WHEN OTHERS THEN
+        Pk01_Syslog.raise_Exception('ERROR', c_PkgName||'.'||v_prcName );
+END;            
+
+-- ------------------------------------------------------------- --
 -- список операций за период (пример)
 -- ------------------------------------------------------------- --
 PROCEDURE Balance_oper_list( 
                p_recordset    OUT t_refc, 
-               p_rep_period_id IN INTEGER    -- ID периода счета
+               p_rep_period_id IN INTEGER,    -- ID периода счета
+               p_oper_type_id  in number
            )
 IS
     v_prcName    CONSTANT VARCHAR2(30) := 'Balance_oper_list';
@@ -677,12 +1106,63 @@ IS
 BEGIN
     -- возвращаем курсор
     OPEN p_recordset FOR
-      SELECT OPER_ID, OPER_TYPE_ID, OPER_DATE, OPER_TOTAL,
-             SRC_ACCOUNT_ID, SRC_REP_PERIOD_ID, SRC_BILL_ID, SRC_PAYMENT_ID,
-             DST_ACCOUNT_ID, DST_REP_PERIOD_ID, DST_BILL_ID, DST_PAYMENT_ID,
-             CREATED_BY, NOTES 
-        FROM ACCOUNT_OPERATION_T
-       WHERE DST_REP_PERIOD_ID = p_rep_period_id;
+      SELECT 
+             PT.OPER_NAME           OPER_TYPE_NAME,
+             PO.OPER_ID, 
+             PO.OPER_DATE,
+             PO.CREATED_BY, 
+             PO.OPER_TOTAL,
+             PO.NOTES,
+             --
+             ACCS.ACCOUNT_NO        SRC_ACCOUNT_NO,
+             PO.SRC_REP_PERIOD_ID   SRC_REP_PERIOD_ID, 
+             BS.BILL_TYPE           SRC_BILL_TYPE, 
+             BS.BILL_NO             SRC_BILL_NO, 
+             PS.PAYMENT_ID          SRC_PAYMENT_ID, 
+             PS.PAYMENT_TYPE        SRC_PAYMENT_TYPE, 
+             PS.DOC_ID              SRC_DOC_ID, 
+             PS.PAYMENT_DATE        SRC_PAYMENT_DATE, 
+             PSS.PAYSYSTEM_CODE     SRC_PAYSYSTEM, 
+             --PS.PAY_DESCR SRC_PAY_DESCR,  
+             ACCD.ACCOUNT_NO        SRC_ACCOUNT_NO,
+             PO.DST_REP_PERIOD_ID   DST_REP_PERIOD_ID,
+             BD.BILL_TYPE           DST_BILL_TYPE, 
+             BD.BILL_NO             DST_BILL_NO,
+             PD.PAYMENT_ID          DST_PAYMENT_ID, 
+             PD.PAYMENT_TYPE        DST_PAYMENT_TYPE, 
+             PD.DOC_ID              DST_DOC_ID, 
+             PD.PAYMENT_DATE        DST_PAYMENT_DATE, 
+             PSS.PAYSYSTEM_CODE     DST_PAYSYSTEM,
+              --PD.PAY_DESCR DST_PAY_DESCR,  
+             PO.OPER_TYPE_ID
+        FROM 
+                PAYMENT_OPERATION_T PO, 
+                PAYMENT_OPERATION_TYPE_T PT, 
+                BILL_T BS, 
+                BILL_T BD, 
+                PAYMENT_T PS, 
+                PAYMENT_T PD,
+                PAYSYSTEM_T PSS, 
+                PAYSYSTEM_T PSD,
+                account_t accS,
+                account_t accD
+       WHERE PO.OPER_TYPE_ID      = PT.OPER_TYPE_ID
+         AND PO.SRC_BILL_ID       = BS.BILL_ID(+)
+         AND PO.SRC_REP_PERIOD_ID = BS.REP_PERIOD_ID(+)
+         AND PO.DST_BILL_ID       = BD.BILL_ID(+)
+         AND PO.DST_REP_PERIOD_ID = BD.REP_PERIOD_ID(+)
+         AND PO.SRC_PAYMENT_ID    = PS.PAYMENT_ID(+)
+         AND PO.SRC_REP_PERIOD_ID = PS.REP_PERIOD_ID(+)
+         AND PO.DST_PAYMENT_ID    = PD.PAYMENT_ID(+)
+         AND PO.DST_REP_PERIOD_ID = PD.REP_PERIOD_ID(+)
+         AND PSS.PAYSYSTEM_ID(+)  = PS.PAYSYSTEM_ID
+         AND PSD.PAYSYSTEM_ID(+)  = PD.PAYSYSTEM_ID
+         AND ACCS.ACCOUNT_ID (+)  = PO.SRC_ACCOUNT_ID 
+         AND ACCD.ACCOUNT_ID (+)  = PO.DST_ACCOUNT_ID
+         AND PO.OPER_TYPE_ID      > 10
+         AND (p_rep_period_id is null or  PO.DST_REP_PERIOD_ID = p_rep_period_id)
+         and (p_oper_type_id is null or PO.OPER_TYPE_ID = p_oper_type_id )
+      ORDER BY OPER_DATE DESC;
  
 EXCEPTION
     WHEN OTHERS THEN
